@@ -1,0 +1,224 @@
+/**
+ * 将 ExportFormatConfig 映射为 CSS 自定义属性，注入正文预览容器
+ * （.markdown-viewer.export-format-preview，见 shared-markdown.css）。
+ *
+ * 只覆盖正文排版：纸张宽度、正文边距、字体字号行距、列表与标题样式。
+ * 页眉页脚、章节页框、纸面模拟那一套 CSS 变量已经删掉 —— 模板设置页的预览
+ * 早就换成 docx-editor.dev 渲染真实 docx 了（ExportFormatPage 的 DocxEditor），
+ * 那条链路走的是共享几何 + C# 排版，不吃这里的变量。
+ */
+
+import { resolveChromeLayoutWithText } from '../../../electron/shared/chrome/index.mjs';
+import type { ExportFormatConfig, HeadingStyleConfig, ListStyle, OrderedListStyle } from '../types/exportFormat';
+import { SIZE_TO_PT, FONT_TO_CSS, ALIGNMENT_TO_CSS } from '../types/exportFormat';
+
+/**
+ * 中文字号名 → pt 值
+ */
+export function chineseSizeToPt(sizeName: string): number {
+  return SIZE_TO_PT[sizeName] ?? 12;
+}
+
+/**
+ * 中文字体名 → CSS font-family
+ */
+export function chineseFontToCss(fontName: string): string {
+  return FONT_TO_CSS[fontName] ?? `'${fontName}', sans-serif`;
+}
+
+/**
+ * 中文对齐名 → CSS text-align
+ */
+export function alignmentToCss(align: string): string {
+  return ALIGNMENT_TO_CSS[align] ?? 'left';
+}
+
+/**
+ * 构建标题级别的 CSS 变量集
+ */
+function buildHeadingVars(level: number, config: HeadingStyleConfig): Record<string, string> {
+  const n = level + 1; // CSS 变量用 h1-h6
+  const sizePt = chineseSizeToPt(config.size);
+
+  return {
+    [`--ef-h${n}-font`]: chineseFontToCss(config.font),
+    [`--ef-h${n}-size`]: `${sizePt}pt`,
+    [`--ef-h${n}-align`]: alignmentToCss(config.alignment),
+    [`--ef-h${n}-weight`]: config.bold ? '700' : '400',
+    [`--ef-h${n}-color`]: config.text_color || '#243048',
+    [`--ef-h${n}-spacing-before`]: `${config.spacing_before_pt}pt`,
+    [`--ef-h${n}-spacing-after`]: `${config.spacing_after_pt}pt`,
+    [`--ef-h${n}-indent`]: '0',
+    [`--ef-h${n}-line-height`]: String(config.line_spacing),
+  };
+}
+
+function unorderedListStyleToCss(style: ListStyle | string | undefined, listIndent: string) {
+  switch (style) {
+    case 'none':
+      return { marker: '""', font: 'inherit', size: '1em', display: 'none', indent: listIndent };
+    case 'circle':
+      return { marker: '"○"', font: 'Arial, sans-serif', size: '0.82em', display: 'inline-block', indent: listIndent };
+    case 'square':
+      return { marker: '"■"', font: 'Arial, sans-serif', size: '0.72em', display: 'inline-block', indent: listIndent };
+    case 'diamond':
+      return { marker: '"◆"', font: 'Arial, sans-serif', size: '0.72em', display: 'inline-block', indent: listIndent };
+    case 'dash':
+      return { marker: '"–"', font: 'Arial, sans-serif', size: '0.9em', display: 'inline-block', indent: listIndent };
+    case 'check':
+      return { marker: '"✓"', font: 'Segoe UI Symbol, Arial, sans-serif', size: '0.85em', display: 'inline-block', indent: listIndent };
+    case 'arrow':
+      return { marker: '"➢"', font: 'Segoe UI Symbol, Arial, sans-serif', size: '0.88em', display: 'inline-block', indent: listIndent };
+    case 'sparkle':
+      return { marker: '"✧"', font: 'Segoe UI Symbol, Arial, sans-serif', size: '0.9em', display: 'inline-block', indent: listIndent };
+    default:
+      return { marker: '"•"', font: 'Arial, sans-serif', size: '0.75em', display: 'inline-block', indent: listIndent };
+  }
+}
+
+function orderedListStyleToCss(style: OrderedListStyle | string | undefined) {
+  switch (style) {
+    case 'decimal-paren':
+      return { counterStyle: 'decimal', prefix: '""', suffix: '"） "' };
+    case 'decimal-full-paren':
+      return { counterStyle: 'decimal', prefix: '"（"', suffix: '"） "' };
+    case 'chinese-dot':
+      return { counterStyle: 'cjk-ideographic', prefix: '""', suffix: '"、 "' };
+    case 'chinese-paren':
+      return { counterStyle: 'cjk-ideographic', prefix: '"（"', suffix: '"） "' };
+    case 'lower-alpha':
+      return { counterStyle: 'lower-alpha', prefix: '""', suffix: '". "' };
+    case 'upper-alpha':
+      return { counterStyle: 'upper-alpha', prefix: '""', suffix: '". "' };
+    case 'lower-roman':
+      return { counterStyle: 'lower-roman', prefix: '""', suffix: '". "' };
+    case 'upper-roman':
+      return { counterStyle: 'upper-roman', prefix: '""', suffix: '". "' };
+    default:
+      return { counterStyle: 'decimal', prefix: '""', suffix: '". "' };
+  }
+}
+
+/**
+ * 将完整的 ExportFormatConfig 转换为 CSS 自定义属性键值对
+ * 可直接展开到 React 组件的 style 属性上
+ */
+export function buildExportFormatCssVars(config: ExportFormatConfig): Record<string, string> {
+  const vars: Record<string, string> = {};
+
+  // ── 页面设置 ──
+  // 纸张与边距取自共享几何模块，与正式导出、C# 样张同源；正文边距要为页眉页脚
+  // 装饰带让位，所以必须走 resolveChromeLayoutWithText 而不是配置里的原始值。
+  const { layout } = resolveChromeLayoutWithText(config.page as unknown as Record<string, unknown>);
+
+  vars['--ef-page-width'] = `${layout.widthCm}cm`;
+  vars['--ef-page-padding-top'] = `${layout.marginTopCm}cm`;
+  vars['--ef-page-padding-bottom'] = `${layout.marginBottomCm}cm`;
+  vars['--ef-page-padding-left'] = `${layout.marginLeftCm}cm`;
+  vars['--ef-page-padding-right'] = `${layout.marginRightCm}cm`;
+
+  // ── 正文 ──
+  const bodySizePt = chineseSizeToPt(config.body_text.size);
+  vars['--ef-body-font'] = chineseFontToCss(config.body_text.font);
+  vars['--ef-body-size'] = `${bodySizePt}pt`;
+  vars['--ef-body-align'] = alignmentToCss(config.body_text.alignment);
+  // 与无文档网格的 Word 预览一致，标准行单位为 12pt，不取 CSS 当前行高。
+  vars['--ef-body-spacing-before'] = `${(config.body_text.spacing_before ?? 0) * (config.body_text.spacing_before_unit === 'pt' ? 1 : 12)}pt`;
+  vars['--ef-body-spacing-after'] = `${(config.body_text.spacing_after ?? 0) * (config.body_text.spacing_after_unit === 'pt' ? 1 : 12)}pt`;
+  vars['--ef-body-indent'] = config.body_text.first_line_indent_chars > 0
+    ? `${config.body_text.first_line_indent_chars}em`
+    : '0';
+  const lineMode = config.body_text.line_spacing_mode ?? 'multiple';
+  const lineValue = config.body_text.line_spacing_value ?? 1.2;
+  // HTML 正文展示使用对应 CSS；模板预览直接读取 Word 原生间距，不经 CSS 换算。
+  vars['--ef-body-line-height'] = lineMode === 'exact' ? `${lineValue}pt`
+    : lineMode === 'at-least' ? `max(1em, ${lineValue}pt)`
+      : String(lineMode === 'single' ? 1 : lineMode === 'one-and-half' ? 1.5 : lineMode === 'double' ? 2 : lineValue);
+  const listIndent = `${config.body_text.list_indent_chars ?? 2}em`;
+  vars['--ef-list-indent'] = listIndent;
+  const unorderedListStyle = unorderedListStyleToCss(config.body_text.list_style, listIndent);
+  vars['--ef-unordered-list-marker'] = unorderedListStyle.marker;
+  vars['--ef-unordered-list-marker-font'] = unorderedListStyle.font;
+  vars['--ef-unordered-list-marker-size'] = unorderedListStyle.size;
+  vars['--ef-unordered-list-marker-display'] = unorderedListStyle.display;
+  vars['--ef-unordered-list-indent'] = unorderedListStyle.indent;
+  const orderedListStyle = orderedListStyleToCss(config.body_text.ordered_list_style);
+  vars['--ef-ordered-list-counter-style'] = orderedListStyle.counterStyle;
+  vars['--ef-ordered-list-prefix'] = orderedListStyle.prefix;
+  vars['--ef-ordered-list-suffix'] = orderedListStyle.suffix;
+
+  // ── 各级标题 h1-h6 ──
+  for (let i = 0; i < 6; i++) {
+    const heading = config.headings[i];
+    if (heading) {
+      Object.assign(vars, buildHeadingVars(i, heading));
+    }
+  }
+
+  // ── 表格 ──
+  const table = config.table;
+  if (table) {
+    vars['--ef-table-border-width'] = `${table.border_width ?? 1}px`;
+    vars['--ef-table-border-color'] = table.border_color || '#dcdff6';
+    vars['--ef-table-cell-padding'] = `${table.cell_padding_pt ?? 6}pt`;
+    vars['--ef-table-caption-font'] = chineseFontToCss(table.caption_font || '宋体');
+    vars['--ef-table-caption-size'] = `${chineseSizeToPt(table.caption_size || '小四')}pt`;
+    vars['--ef-table-caption-align'] = alignmentToCss(table.caption_alignment || '居中对齐');
+    vars['--ef-table-caption-weight'] = table.caption_bold ? '700' : '400';
+    vars['--ef-table-caption-style'] = table.caption_italic ? 'italic' : 'normal';
+    const tableAreas = [
+      ['header', table.header_row],
+      ['first-column', table.first_column],
+      ['body-cell', table.body_cell],
+    ] as const;
+    tableAreas.forEach(([key, cell]) => {
+      if (!cell) return;
+      vars[`--ef-table-${key}-font`] = chineseFontToCss(cell.font);
+      vars[`--ef-table-${key}-size`] = `${chineseSizeToPt(cell.size)}pt`;
+      vars[`--ef-table-${key}-align`] = alignmentToCss(cell.alignment);
+      vars[`--ef-table-${key}-color`] = cell.text_color || '#243048';
+      vars[`--ef-table-${key}-background`] = cell.background_color || '#ffffff';
+    });
+  }
+
+  // ── 图片 ──
+  const image = config.image;
+  if (image) {
+    const imageAlignment = alignmentToCss(image.alignment || '居中对齐');
+    vars['--ef-image-max-width'] = `${image.max_width_percent ?? 90}%`;
+    vars['--ef-image-align'] = imageAlignment;
+    vars['--ef-image-margin-left'] = imageAlignment === 'right' || imageAlignment === 'center' ? 'auto' : '0';
+    vars['--ef-image-margin-right'] = imageAlignment === 'left' || imageAlignment === 'center' ? 'auto' : '0';
+    vars['--ef-image-caption-font'] = chineseFontToCss(image.caption_font || '宋体');
+    vars['--ef-image-caption-size'] = `${chineseSizeToPt(image.caption_size || '小五')}pt`;
+    vars['--ef-image-caption-align'] = alignmentToCss(image.caption_alignment || '居中对齐');
+    vars['--ef-image-caption-weight'] = image.caption_bold ? '700' : '400';
+    vars['--ef-image-caption-style'] = image.caption_italic ? 'italic' : 'normal';
+  }
+
+  return vars;
+}
+
+/**
+ * 中文字号 → Word half-points（用于 exportService）
+ */
+export function chineseSizeToHalfPoints(sizeName: string): number {
+  const pt = chineseSizeToPt(sizeName);
+  return Math.round(pt * 2);
+}
+
+/**
+ * 厘米 → twips（用于 exportService 页面设置）
+ * 1cm = 567 twips
+ */
+export function cmToTwips(cm: number): number {
+  return Math.round(cm * 567);
+}
+
+/**
+ * 磅 → twips（用于 exportService 间距）
+ * 1pt = 20 twips
+ */
+export function ptToTwips(pt: number): number {
+  return Math.round(pt * 20);
+}

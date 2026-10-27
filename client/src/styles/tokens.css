@@ -1,0 +1,166 @@
+/* [1-25] root vars + universal box-sizing reset */
+:root {
+  --yb-primary: #1768e5;
+  --yb-primary-hover: #2d7bf0;
+  --yb-primary-deep: #0f55c7;
+  /* 兼容旧业务样式中的 violet 变量，亮色 v2 统一收敛到品牌蓝色系。 */
+  --yb-violet: #4a86e8;
+  --yb-bg: #f2f7fd;
+  --yb-surface: #ffffff;
+  --yb-surface-soft: #f8fbff;
+  --yb-surface-tint: #edf5ff;
+  --yb-border: #d8e3f1;
+  --yb-border-soft: #e7eef7;
+  --yb-text: #102341;
+  --yb-text-soft: #52657f;
+  --yb-text-muted: #647790;
+
+  /* 语义色：成功 / 警告 / 危险，各含主色、深文字、浅背景、边框四档 */
+  --yb-success: #168a4a;
+  --yb-success-deep: #0f6f3b;
+  --yb-success-soft: #e9f7ef;
+  --yb-success-border: #bfe5cd;
+  --yb-warning: #f28a00;
+  --yb-warning-deep: #9a5b00;
+  --yb-warning-soft: #fdf3e4;
+  --yb-warning-border: #f2d8ab;
+  --yb-danger: #c83220;
+  --yb-danger-deep: #a32619;
+  --yb-danger-soft: #fdeeeb;
+  --yb-danger-border: #f3c8c0;
+
+  /* 圆角阶梯：胶囊用 pill，卡片用 xl，面板内容块用 lg/md，小控件用 sm */
+  --yb-radius-sm: 6px;
+  --yb-radius-md: 8px;
+  --yb-radius-lg: 10px;
+  --yb-radius-xl: 12px;
+  --yb-radius-pill: 999px;
+
+  /* 分层阴影体系：由弱到强，元素层级越高、越需要强调，阴影越重 */
+  --yb-shadow-xs: 0 1px 3px rgba(25, 59, 103, 0.05);
+  --yb-shadow-sm: 0 4px 12px rgba(25, 59, 103, 0.06);
+  --yb-shadow: 0 8px 24px rgba(25, 59, 103, 0.07);
+  --yb-shadow-lg: 0 14px 34px rgba(25, 59, 103, 0.1), 0 2px 8px rgba(25, 59, 103, 0.05);
+  --yb-shadow-hover: 0 12px 28px rgba(23, 104, 229, 0.13), 0 2px 8px rgba(25, 59, 103, 0.06);
+  --yb-shadow-modal: 0 24px 64px rgba(16, 35, 65, 0.2);
+
+  /* 统一键盘焦点环 */
+  --yb-focus-ring: 0 0 0 3px rgba(23, 104, 229, 0.18);
+
+  /* 壳层尺寸由共享布局统一消费，业务页无需感知侧栏宽度。 */
+  --yb-sidebar-width: 232px;
+  --yb-sidebar-collapsed-width: 72px;
+  --yb-shell-gutter: 20px;
+
+  /* 统一过渡节奏：交互反馈用更快的 ease-out，跨状态切换用更柔和的曲线 */
+  --yb-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --yb-duration-fast: 140ms;
+  --yb-duration: 220ms;
+
+  /* Toast 始终位于应用内所有弹窗、遮罩和全屏预览之上。 */
+  --yb-z-toast: 2147483647;
+  --yb-z-agent-question: 2000;
+
+  color: var(--yb-text);
+  background: var(--yb-bg);
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", Inter, system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* [27-37] html/body/#root reset + body overflow hidden */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+/* [159-188] sr-only + button/input/select font inherit + select arrow + button cursor */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+select {
+  appearance: none;
+  padding-right: 42px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%2352657f' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 18px 18px;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* 全局键盘焦点可见性：按钮/链接类控件用 outline 环，文本输入类控件用统一的蓝色焦点环。
+ * 仅在 :focus-visible（键盘导航）时出现，鼠标点击不受影响；feature 层可用更高优先级覆盖。 */
+button:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid rgba(23, 104, 229, 0.58);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--yb-focus-ring);
+}
+
+/* 全局统一细滚动条（标准属性，Chromium 新版下自动覆盖 webkit 私有样式） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(82, 101, 127, 0.3) transparent;
+}
+
+/* 弱动效偏好：关闭弹窗进场和装饰性无限动画（pulse/扫光），
+ * 保留加载 spinner（yb-spin / workspace-database-spin）表达"进行中"状态。 */
+@media (prefers-reduced-motion: reduce) {
+  [class*='-modal'][data-state='open'],
+  [class*='-overlay'][data-state='open'],
+  [class*='-card'][data-state='open'],
+  [class*='-dialog'][data-state='open'],
+  .agent-runtime-status-bar.is-running .agent-runtime-status-dot,
+  .yb-progress-track.is-active::after,
+  .content-outline-item.is-running .content-outline-dot,
+  .content-outline-item.is-planning .content-outline-dot,
+  .plugin-status-pill.is-updating {
+    animation: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}

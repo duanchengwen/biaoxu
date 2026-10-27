@@ -1,0 +1,313 @@
+/* 可行性研究报告：只补充本功能特有布局，步骤页尽量复用技术方案工作台既有类名。 */
+
+.technical-workbench > .feasibility-materials-page {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.feasibility-project-form {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 24px;
+}
+
+.feasibility-project-form h3 {
+  margin: 7px 0 5px;
+  color: var(--yb-text);
+  font-size: 24px;
+  letter-spacing: -0.025em;
+}
+
+.feasibility-project-form p {
+  margin: 0;
+  color: var(--yb-text-soft);
+}
+
+.feasibility-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.feasibility-form-grid .is-wide {
+  grid-column: 1 / -1;
+}
+
+.feasibility-form-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--yb-text-soft);
+  font-size: 13px;
+}
+
+.feasibility-form-grid input,
+.feasibility-form-grid select,
+.feasibility-form-grid textarea,
+.outline-word-control-grid select,
+.feasibility-export-options input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--yb-text);
+  background: #ffffff;
+  border: 1px solid var(--yb-border);
+  border-radius: var(--yb-radius-md);
+}
+
+.feasibility-form-grid textarea {
+  resize: vertical;
+}
+
+.feasibility-outline-config-fields {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.feasibility-markdown-workspace {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+}
+
+.feasibility-markdown-workspace > .outline-progress-panel {
+  height: 100%;
+  min-height: 0;
+}
+
+.feasibility-markdown-workspace > .content-outline-stats {
+  min-height: 0;
+  overflow: auto;
+  border-bottom: 0;
+  border-right: 1px solid var(--yb-border-soft);
+}
+
+.feasibility-markdown-workspace > .markdown-editor,
+.feasibility-markdown-workspace > .global-facts-reader {
+  height: 100%;
+  min-height: 0;
+}
+
+.feasibility-analysis-edit-pane {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.feasibility-analysis-edit-pane .markdown-editor {
+  height: 100%;
+  min-height: 0;
+}
+
+.feasibility-export-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 101;
+  display: grid;
+  width: min(1120px, calc(100vw - 48px));
+  max-height: min(780px, calc(100vh - 48px));
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 18px;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid rgba(228, 233, 240, 0.9);
+  border-radius: var(--yb-radius-xl);
+  box-shadow: var(--yb-shadow-modal);
+  transform: translate(-50%, -50%);
+}
+
+.feasibility-export-dialog .export-template-select-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.feasibility-export-dialog .export-template-select-head h2 {
+  margin: 5px 0 3px;
+  color: var(--yb-text);
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.feasibility-export-dialog .export-template-select-head p {
+  margin: 0;
+  color: var(--yb-text-soft);
+  line-height: 1.6;
+}
+
+.feasibility-export-dialog .export-template-select-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+}
+
+.feasibility-export-dialog .export-template-select-list-panel,
+.feasibility-export-dialog .export-template-select-preview {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: rgba(248, 250, 253, 0.82);
+  border: 1px solid var(--yb-border-soft);
+  border-radius: var(--yb-radius-lg);
+}
+
+.feasibility-export-dialog .export-template-select-list-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+}
+
+.feasibility-export-dialog .export-template-select-search {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  color: var(--yb-text);
+  background: #ffffff;
+  border: 1px solid var(--yb-border-soft);
+  border-radius: var(--yb-radius-md);
+  outline: none;
+}
+
+.feasibility-export-dialog .export-template-select-search:focus {
+  border-color: rgba(33, 116, 253, 0.5);
+  box-shadow: var(--yb-focus-ring);
+}
+
+.feasibility-export-dialog .export-template-select-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.feasibility-export-dialog .export-template-select-row {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  color: var(--yb-text);
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid rgba(228, 233, 240, 0.82);
+  border-radius: var(--yb-radius-md);
+  cursor: pointer;
+  transition: background var(--yb-duration-fast) ease, border-color var(--yb-duration-fast) ease, box-shadow var(--yb-duration-fast) ease, color var(--yb-duration-fast) ease;
+}
+
+.feasibility-export-dialog .export-template-select-row strong {
+  display: block;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feasibility-export-dialog .export-template-select-row.is-active {
+  color: var(--yb-primary);
+  background: rgba(33, 116, 253, 0.08);
+  border-color: rgba(33, 116, 253, 0.34);
+}
+
+.feasibility-export-dialog .export-template-select-row:hover:not(.is-active) {
+  border-color: rgba(33, 116, 253, 0.24);
+  box-shadow: var(--yb-shadow-sm);
+}
+
+.feasibility-export-dialog .export-template-select-empty,
+.feasibility-export-dialog .export-template-select-preview-empty {
+  display: grid;
+  min-height: 140px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 18px;
+  color: var(--yb-text-soft);
+  text-align: center;
+}
+
+.feasibility-export-dialog .export-template-select-empty strong,
+.feasibility-export-dialog .export-template-select-preview-empty strong {
+  color: var(--yb-text);
+}
+
+.feasibility-export-dialog .export-template-select-preview {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.feasibility-export-dialog .export-template-select-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.78);
+  border-bottom: 1px solid var(--yb-border-soft);
+}
+
+.feasibility-export-dialog .export-template-select-preview-head strong {
+  overflow: hidden;
+  color: var(--yb-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feasibility-export-dialog .export-template-select-preview .export-template-preview-panel {
+  position: relative;
+  top: auto;
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.feasibility-export-dialog .export-template-select-preview .export-template-preview-scroll {
+  padding: 0;
+}
+
+.feasibility-export-dialog .export-template-select-actions {
+  padding-top: 0;
+}
+
+.feasibility-export-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 16px;
+  padding: 12px 14px;
+  background: rgba(248, 250, 253, 0.82);
+  border: 1px solid var(--yb-border-soft);
+  border-radius: var(--yb-radius-lg);
+}
+
+.feasibility-export-options label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--yb-text);
+  font-size: 13px;
+}
+
+.feasibility-export-options label:nth-child(4),
+.feasibility-export-options label:nth-child(5),
+.feasibility-export-options label:nth-child(6) {
+  display: grid;
+  gap: 6px;
+  color: var(--yb-text-soft);
+}
+
+@media (max-width: 900px) {
+  .feasibility-form-grid,
+  .feasibility-export-options {
+    grid-template-columns: 1fr;
+  }
+
+  .feasibility-markdown-workspace {
+    grid-template-columns: 1fr;
+  }
+}

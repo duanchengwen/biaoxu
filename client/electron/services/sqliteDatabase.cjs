@@ -1,0 +1,2220 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const Database = require('better-sqlite3');
+const { getWorkspaceDatabasePath } = require('../utils/paths.cjs');
+
+const schemaVersion = 44;
+
+// 保存当前工作区的一份开票信息。
+function createOfficialInvoiceSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS official_invoice_info (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      title_type TEXT NOT NULL DEFAULT 'enterprise',
+      buyer TEXT NOT NULL DEFAULT '',
+      tax_number TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT ''
+    );
+  `);
+}
+
+function createInitialSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS technical_plan_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      step TEXT NOT NULL DEFAULT 'document-analysis',
+      tender_file_name TEXT,
+      tender_markdown_path TEXT,
+      tender_markdown_hash TEXT,
+      tender_markdown_chars INTEGER NOT NULL DEFAULT 0,
+      tender_parser_label TEXT,
+      tender_imported_at TEXT,
+      tender_files_json TEXT,
+      tender_original_markdown_path TEXT,
+      tender_original_markdown_hash TEXT,
+      tender_original_markdown_chars INTEGER NOT NULL DEFAULT 0,
+      original_plan_file_name TEXT,
+      original_plan_markdown_path TEXT,
+      original_plan_markdown_hash TEXT,
+      original_plan_markdown_chars INTEGER NOT NULL DEFAULT 0,
+      original_plan_parser_label TEXT,
+      original_plan_imported_at TEXT,
+      pending_tender_markdown_path TEXT,
+      pending_tender_file_name TEXT,
+      pending_tender_parser_label TEXT,
+      pending_tender_sections_json TEXT,
+      pending_tender_total_declared INTEGER,
+      pending_tender_created_at TEXT,
+      bid_sections_json TEXT,
+      bid_section_extraction_status TEXT NOT NULL DEFAULT 'idle',
+      bid_section_extraction_error TEXT,
+      outline_word_control_snapshot_json TEXT,
+      outline_project_name TEXT,
+      outline_project_overview TEXT,
+      content_generation_runtime_json TEXT,
+      selected_section_id TEXT,
+      selected_section_title TEXT,
+      selected_section_head_line TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_tasks (
+      type TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      stats_json TEXT,
+      error TEXT,
+      pause_requested INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_bid_items (
+      item_id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      status TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_bid_items_order
+    ON technical_plan_bid_items(sort_order);
+
+    CREATE TABLE IF NOT EXISTS technical_plan_outline_nodes (
+      node_id TEXT PRIMARY KEY,
+      parent_node_id TEXT,
+      sort_order INTEGER NOT NULL,
+      level INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      content_mode TEXT,
+      content_mode_note TEXT,
+      source_requirement_id TEXT,
+      source_requirement_title TEXT,
+      knowledge_item_ids_json TEXT,
+      content TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (parent_node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_outline_parent_order
+    ON technical_plan_outline_nodes(parent_node_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_outline_level
+    ON technical_plan_outline_nodes(level);
+
+    CREATE TABLE IF NOT EXISTS technical_plan_content_sections (
+      node_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'idle',
+      error TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_content_sections_status
+    ON technical_plan_content_sections(status);
+
+    CREATE TABLE IF NOT EXISTS technical_plan_content_plans (
+      node_id TEXT PRIMARY KEY,
+      plan_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (node_id) REFERENCES technical_plan_outline_nodes(node_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_global_fact_groups (
+      group_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_global_fact_groups_order
+    ON technical_plan_global_fact_groups(sort_order);
+  `);
+
+  createTechnicalPlanGenerationConfigSchema(db);
+}
+
+// 技术方案生成配置统一使用单例配置表，列表选择使用关联表保存顺序。
+function createTechnicalPlanGenerationConfigSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS technical_plan_generation_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      bid_analysis_mode TEXT NOT NULL DEFAULT 'key',
+      bid_section_mode TEXT NOT NULL DEFAULT 'single',
+      outline_mode TEXT NOT NULL DEFAULT 'response-file',
+      outline_expansion_mode TEXT NOT NULL DEFAULT 'ai-complement',
+      minimum_words INTEGER NOT NULL DEFAULT 0,
+      maximum_words INTEGER NOT NULL DEFAULT 0,
+      section_words INTEGER NOT NULL DEFAULT 0,
+      word_control_mode TEXT NOT NULL DEFAULT 'pages',
+      target_pages INTEGER NOT NULL DEFAULT 0,
+      minimum_pages INTEGER NOT NULL DEFAULT 0,
+      maximum_pages INTEGER NOT NULL DEFAULT 0,
+      global_facts_mode TEXT NOT NULL DEFAULT 'fabricate',
+      export_template_id TEXT NOT NULL DEFAULT '',
+      use_ai_images INTEGER NOT NULL DEFAULT 1,
+      use_mermaid_images INTEGER NOT NULL DEFAULT 1,
+      use_html_images INTEGER NOT NULL DEFAULT 1,
+      html_image_types TEXT NOT NULL DEFAULT '',
+      table_requirement TEXT NOT NULL DEFAULT 'heavy',
+      naturalize_writing INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS technical_plan_generation_bid_tasks (
+      task_id TEXT PRIMARY KEY,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_generation_bid_tasks_order
+    ON technical_plan_generation_bid_tasks(sort_order);
+
+    CREATE TABLE IF NOT EXISTS technical_plan_generation_reference_docs (
+      document_id TEXT PRIMARY KEY,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_generation_reference_docs_order
+    ON technical_plan_generation_reference_docs(sort_order);
+  `);
+}
+
+function createTechnicalPlanGlobalFactsSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS technical_plan_global_fact_groups (
+      group_id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_technical_plan_global_fact_groups_order
+    ON technical_plan_global_fact_groups(sort_order);
+  `);
+}
+
+function addTechnicalPlanBidSectionV6Compat(db) {
+  // v6 兼容：部分旧版本客户端可能已添加 current_bid_section_id 和 bid_sections_extracted，
+  // 此处做幂等处理，如果列已存在则 ALTER TABLE 会抛错，用 try/catch 忽略。
+  const cols = db.prepare("PRAGMA table_info(technical_plan_meta)").all().map((row) => row.name);
+  const addIfMissing = (name, type) => {
+    if (!cols.includes(name)) {
+      db.exec(`ALTER TABLE technical_plan_meta ADD COLUMN ${name} ${type}`);
+    }
+  };
+  addIfMissing('current_bid_section_id', 'TEXT');
+  addIfMissing('bid_sections_extracted', 'INTEGER');
+}
+
+function addTechnicalPlanSelectedSection(db) {
+  const cols = db.prepare("PRAGMA table_info(technical_plan_meta)").all().map((row) => row.name);
+  const addIfMissing = (name, type) => {
+    if (!cols.includes(name)) {
+      db.exec(`ALTER TABLE technical_plan_meta ADD COLUMN ${name} ${type}`);
+    }
+  };
+  addIfMissing('selected_section_id', 'TEXT');
+  addIfMissing('selected_section_title', 'TEXT');
+  addIfMissing('selected_section_head_line', 'TEXT');
+}
+
+function addTechnicalPlanPendingTenderSelection(db) {
+  const cols = db.prepare("PRAGMA table_info(technical_plan_meta)").all().map((row) => row.name);
+  const addIfMissing = (name, type) => {
+    if (!cols.includes(name)) {
+      db.exec(`ALTER TABLE technical_plan_meta ADD COLUMN ${name} ${type}`);
+    }
+  };
+  addIfMissing('pending_tender_markdown_path', 'TEXT');
+  addIfMissing('pending_tender_file_name', 'TEXT');
+  addIfMissing('pending_tender_parser_label', 'TEXT');
+  addIfMissing('pending_tender_sections_json', 'TEXT');
+  addIfMissing('pending_tender_total_declared', 'INTEGER');
+  addIfMissing('pending_tender_created_at', 'TEXT');
+}
+
+function addTechnicalPlanOriginalPlan(db) {
+  const cols = db.prepare("PRAGMA table_info(technical_plan_meta)").all().map((row) => row.name);
+  const addIfMissing = (name, type) => {
+    if (!cols.includes(name)) {
+      db.exec(`ALTER TABLE technical_plan_meta ADD COLUMN ${name} ${type}`);
+    }
+  };
+  addIfMissing('original_plan_file_name', 'TEXT');
+  addIfMissing('original_plan_markdown_path', 'TEXT');
+  addIfMissing('original_plan_markdown_hash', 'TEXT');
+  addIfMissing('original_plan_markdown_chars', 'INTEGER NOT NULL DEFAULT 0');
+  addIfMissing('original_plan_parser_label', 'TEXT');
+  addIfMissing('original_plan_imported_at', 'TEXT');
+}
+
+function addTechnicalPlanBidAnalysisSelection(db) {
+  const cols = db.prepare("PRAGMA table_info(technical_plan_meta)").all().map((row) => row.name);
+  if (!cols.includes('bid_analysis_selected_task_ids_json')) {
+    db.exec('ALTER TABLE technical_plan_meta ADD COLUMN bid_analysis_selected_task_ids_json TEXT');
+  }
+}
+
+function addTechnicalPlanOutlineExpansionMode(db) {
+  addColumnIfMissing(db, 'technical_plan_meta', 'outline_expansion_mode', "TEXT NOT NULL DEFAULT 'ai-complement'");
+}
+
+function addTechnicalPlanGlobalFactsMode(db) {
+  addColumnIfMissing(db, 'technical_plan_meta', 'global_facts_mode', "TEXT NOT NULL DEFAULT 'fabricate'");
+}
+
+function addTechnicalPlanBidSectionOptimization(db) {
+  addColumnIfMissing(db, 'technical_plan_meta', 'tender_original_markdown_path', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_meta', 'tender_original_markdown_hash', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_meta', 'tender_original_markdown_chars', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'technical_plan_meta', 'bid_section_mode', "TEXT NOT NULL DEFAULT 'single'");
+  addColumnIfMissing(db, 'technical_plan_meta', 'bid_sections_json', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_meta', 'bid_section_extraction_status', "TEXT NOT NULL DEFAULT 'idle'");
+  addColumnIfMissing(db, 'technical_plan_meta', 'bid_section_extraction_error', 'TEXT');
+}
+
+function addTechnicalPlanTenderFiles(db) {
+  addColumnIfMissing(db, 'technical_plan_meta', 'tender_files_json', 'TEXT');
+}
+
+function addTechnicalPlanIllustrationPlan(db) {
+  removeLegacyTechnicalPlanIllustrationType(db);
+}
+
+// 为目录生成当前设置和目录生效快照分别增加存储字段。
+function addTechnicalPlanOutlineWordControl(db) {
+  addColumnIfMissing(db, 'technical_plan_meta', 'outline_word_control_options_json', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_meta', 'outline_word_control_snapshot_json', 'TEXT');
+}
+
+// v25 不迁移旧配置值，直接启用新的统一配置表并移除旧存储位置。
+function unifyTechnicalPlanGenerationConfig(db) {
+  createTechnicalPlanGenerationConfigSchema(db);
+  db.exec('DROP TABLE IF EXISTS technical_plan_reference_docs;');
+
+  const columns = getExistingColumns(db, 'technical_plan_meta');
+  const legacyConfigColumns = [
+    'bid_analysis_mode',
+    'bid_analysis_selected_task_ids_json',
+    'bid_section_mode',
+    'outline_mode',
+    'outline_expansion_mode',
+    'global_facts_mode',
+    'outline_word_control_options_json',
+    'content_generation_options_json',
+  ];
+  for (const column of legacyConfigColumns) {
+    if (columns.has(column)) {
+      db.exec(`ALTER TABLE technical_plan_meta DROP COLUMN ${column}`);
+    }
+  }
+}
+
+// 目录叶子内容处理模式；父节点保持为空，旧测试目录不补默认值。
+function addTechnicalPlanOutlineContentMode(db) {
+  addColumnIfMissing(db, 'technical_plan_outline_nodes', 'content_mode', 'TEXT');
+  addColumnIfMissing(db, 'technical_plan_outline_nodes', 'content_mode_note', 'TEXT');
+}
+
+function createTaskLogsSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_domain TEXT NOT NULL,
+      task_type TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_logs_task
+    ON task_logs(task_domain, task_type, task_id, id DESC);
+
+    CREATE TRIGGER IF NOT EXISTS trg_technical_plan_task_logs_delete
+    AFTER DELETE ON technical_plan_tasks
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'technical-plan' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_rejection_check_task_logs_delete
+    AFTER DELETE ON rejection_check_tasks
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'rejection-check' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_duplicate_check_task_logs_delete
+    AFTER DELETE ON duplicate_check_tasks
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'duplicate-check' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_technical_plan_task_logs_replace
+    AFTER UPDATE OF task_id ON technical_plan_tasks
+    WHEN OLD.task_id <> NEW.task_id
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'technical-plan' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_rejection_check_task_logs_replace
+    AFTER UPDATE OF task_id ON rejection_check_tasks
+    WHEN OLD.task_id <> NEW.task_id
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'rejection-check' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_duplicate_check_task_logs_replace
+    AFTER UPDATE OF task_id ON duplicate_check_tasks
+    WHEN OLD.task_id <> NEW.task_id
+    BEGIN
+      DELETE FROM task_logs
+      WHERE task_domain = 'duplicate-check' AND task_type = OLD.type AND task_id = OLD.task_id;
+    END;
+
+  `);
+}
+
+function removeLegacyTechnicalPlanIllustrationType(db) {
+  const columns = getExistingColumns(db, 'technical_plan_content_plans');
+  if (columns.has('illustration_type')) {
+    db.exec('ALTER TABLE technical_plan_content_plans DROP COLUMN illustration_type');
+  }
+}
+
+function addKnowledgeDocumentSortOrder(db) {
+  const cols = db.prepare("PRAGMA table_info(knowledge_documents)").all().map((row) => row.name);
+  if (!cols.includes('sort_order')) {
+    db.exec('ALTER TABLE knowledge_documents ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+    const folders = db.prepare('SELECT DISTINCT folder_id FROM knowledge_documents').all();
+    const documentsByFolder = db.prepare('SELECT document_id FROM knowledge_documents WHERE folder_id = ? ORDER BY created_at DESC, document_id ASC');
+    const updateOrder = db.prepare('UPDATE knowledge_documents SET sort_order = ? WHERE document_id = ?');
+    for (const folder of folders) {
+      documentsByFolder.all(folder.folder_id).forEach((document, index) => updateOrder.run(index, document.document_id));
+    }
+  }
+  db.exec(`
+    DROP INDEX IF EXISTS idx_knowledge_documents_folder_order;
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_folder_order
+    ON knowledge_documents(folder_id, sort_order, created_at DESC);
+  `);
+}
+
+function createDuplicateCheckSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS duplicate_check_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      step TEXT NOT NULL DEFAULT 'upload',
+      active_analysis_tab TEXT NOT NULL DEFAULT 'metadata',
+      current_signature TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_files (
+      file_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      extension TEXT NOT NULL,
+      size INTEGER NOT NULL DEFAULT 0,
+      modified_at TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      content_hash TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_files_role_order
+    ON duplicate_check_files(role, sort_order);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_tasks (
+      type TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      stats_json TEXT,
+      error TEXT,
+      payload_signature TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_analysis_sections (
+      section TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      message TEXT NOT NULL DEFAULT '',
+      signature TEXT,
+      stats_json TEXT,
+      started_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_content_files (
+      file_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      content_path TEXT,
+      content_length INTEGER NOT NULL DEFAULT 0,
+      parser_label TEXT,
+      error TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_content_files_status
+    ON duplicate_check_content_files(status);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_metadata_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      value TEXT NOT NULL DEFAULT '',
+      normalized TEXT,
+      date_day TEXT,
+      comparable INTEGER NOT NULL DEFAULT 0,
+      date_comparable INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      UNIQUE(file_id, key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_metadata_file_order
+    ON duplicate_check_metadata_items(file_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_metadata_key
+    ON duplicate_check_metadata_items(key);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_outline_items (
+      item_id TEXT PRIMARY KEY,
+      file_id TEXT NOT NULL,
+      parent_item_id TEXT,
+      level INTEGER NOT NULL,
+      number TEXT,
+      title TEXT NOT NULL,
+      normalized_title TEXT NOT NULL,
+      path_titles_json TEXT NOT NULL,
+      normalized_path TEXT NOT NULL,
+      source TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      from_tender INTEGER NOT NULL DEFAULT 0,
+      matched_tender_sentence TEXT,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_item_id) REFERENCES duplicate_check_outline_items(item_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_outline_file_order
+    ON duplicate_check_outline_items(file_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_outline_normalized
+    ON duplicate_check_outline_items(normalized_title, normalized_path);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_outline_groups (
+      group_id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      score REAL NOT NULL DEFAULT 0,
+      file_ids_json TEXT NOT NULL,
+      item_ids_json TEXT NOT NULL,
+      paths_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_outline_groups_order
+    ON duplicate_check_outline_groups(sort_order);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_outline_pairwise (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_a_id TEXT NOT NULL,
+      file_b_id TEXT NOT NULL,
+      score REAL NOT NULL DEFAULT 0,
+      title_overlap REAL NOT NULL DEFAULT 0,
+      path_overlap REAL NOT NULL DEFAULT 0,
+      order_similarity REAL NOT NULL DEFAULT 0,
+      shared_count INTEGER NOT NULL DEFAULT 0,
+      risk TEXT NOT NULL DEFAULT 'none',
+      FOREIGN KEY (file_a_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      FOREIGN KEY (file_b_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      UNIQUE(file_a_id, file_b_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_outline_pairwise_score
+    ON duplicate_check_outline_pairwise(score DESC);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_content_duplicates (
+      duplicate_id TEXT PRIMARY KEY,
+      sentence TEXT NOT NULL,
+      normalized TEXT NOT NULL,
+      file_ids_json TEXT NOT NULL,
+      first_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_content_duplicates_order
+    ON duplicate_check_content_duplicates(first_order);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_content_occurrences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      duplicate_id TEXT NOT NULL,
+      file_id TEXT NOT NULL,
+      occurrence_count INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (duplicate_id) REFERENCES duplicate_check_content_duplicates(duplicate_id) ON DELETE CASCADE,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      UNIQUE(duplicate_id, file_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_content_occ_file
+    ON duplicate_check_content_occurrences(file_id);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_image_files (
+      file_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      image_count INTEGER NOT NULL DEFAULT 0,
+      unique_image_count INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_duplicate_images (
+      image_id TEXT PRIMARY KEY,
+      hash TEXT NOT NULL,
+      preview_url TEXT NOT NULL,
+      file_ids_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_duplicate_images_hash
+    ON duplicate_check_duplicate_images(hash);
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_duplicate_images_order
+    ON duplicate_check_duplicate_images(sort_order);
+
+    CREATE TABLE IF NOT EXISTS duplicate_check_image_occurrences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_id TEXT NOT NULL,
+      file_id TEXT NOT NULL,
+      occurrence_count INTEGER NOT NULL DEFAULT 0,
+      locations_json TEXT,
+      FOREIGN KEY (image_id) REFERENCES duplicate_check_duplicate_images(image_id) ON DELETE CASCADE,
+      FOREIGN KEY (file_id) REFERENCES duplicate_check_files(file_id) ON DELETE CASCADE,
+      UNIQUE(image_id, file_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_duplicate_check_image_occ_file
+    ON duplicate_check_image_occurrences(file_id);
+  `);
+}
+
+function createRejectionCheckSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rejection_check_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      step TEXT NOT NULL DEFAULT 'documents',
+      active_document_tab TEXT NOT NULL DEFAULT 'tender',
+      active_result_tab TEXT NOT NULL DEFAULT 'analysis',
+      active_check_result_tab TEXT NOT NULL DEFAULT 'rejection',
+      custom_check_items TEXT NOT NULL DEFAULT '',
+      check_options_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rejection_check_documents (
+      document_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      source TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      markdown_path TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      content_chars INTEGER NOT NULL DEFAULT 0,
+      parser_label TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      imported_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_documents_role_order
+    ON rejection_check_documents(role, sort_order);
+
+    CREATE TABLE IF NOT EXISTS rejection_check_tasks (
+      type TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      stats_json TEXT,
+      error TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rejection_check_extraction (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL DEFAULT 'idle',
+      content TEXT NOT NULL DEFAULT '',
+      source TEXT,
+      tender_signature TEXT,
+      error TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS rejection_check_results (
+      result_type TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'idle',
+      input_signature TEXT,
+      active_finding_id TEXT,
+      progress_message TEXT,
+      error TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS rejection_check_risk_findings (
+      finding_id TEXT PRIMARY KEY,
+      bid_document_id TEXT,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      requirement TEXT NOT NULL,
+      bid_evidence TEXT NOT NULL,
+      risk_reason TEXT NOT NULL,
+      suggestion TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_risk_order
+    ON rejection_check_risk_findings(sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_risk_severity
+    ON rejection_check_risk_findings(severity);
+
+    CREATE TABLE IF NOT EXISTS rejection_check_typo_findings (
+      finding_id TEXT PRIMARY KEY,
+      bid_document_id TEXT,
+      wrong_text TEXT NOT NULL,
+      correct_text TEXT NOT NULL,
+      original_excerpt TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      location_hint TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_typo_order
+    ON rejection_check_typo_findings(sort_order);
+
+    CREATE TABLE IF NOT EXISTS rejection_check_logic_findings (
+      finding_id TEXT PRIMARY KEY,
+      bid_document_id TEXT,
+      title TEXT NOT NULL,
+      original_text TEXT NOT NULL,
+      location_hint TEXT NOT NULL,
+      fallacy_reason TEXT NOT NULL,
+      suggestion TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_logic_order
+    ON rejection_check_logic_findings(sort_order);
+  `);
+}
+
+function addColumnIfMissing(db, tableName, columnName, columnType) {
+  if (!getExistingTables(db).has(tableName)) return;
+  const columns = getExistingColumns(db, tableName);
+  if (columns.has(columnName)) return;
+  db.exec(`ALTER TABLE ${quoteIdentifier(tableName)} ADD COLUMN ${quoteIdentifier(columnName)} ${columnType}`);
+}
+
+function migrateRejectionCheckMultiBidDocuments(db) {
+  const existingTables = getExistingTables(db);
+  if (!existingTables.has('rejection_check_documents')) {
+    createRejectionCheckSchema(db);
+  }
+
+  const documentColumns = getExistingColumns(db, 'rejection_check_documents');
+  if (documentColumns.size && !documentColumns.has('document_id')) {
+    db.exec('DROP TABLE IF EXISTS rejection_check_documents_legacy_v12');
+    db.exec('ALTER TABLE rejection_check_documents RENAME TO rejection_check_documents_legacy_v12');
+    createRejectionCheckSchema(db);
+
+    const rows = db.prepare(`
+      SELECT * FROM rejection_check_documents_legacy_v12
+      ORDER BY CASE role WHEN 'tender' THEN 0 ELSE 1 END, role ASC
+    `).all();
+    const insert = db.prepare(`
+      INSERT INTO rejection_check_documents (
+        document_id, role, source, file_name, markdown_path, content_hash, content_chars, parser_label, sort_order, imported_at, updated_at
+      ) VALUES (
+        @document_id, @role, @source, @file_name, @markdown_path, @content_hash, @content_chars, @parser_label, @sort_order, @imported_at, @updated_at
+      )
+    `);
+    let bidIndex = 0;
+    for (const row of rows) {
+      const isBid = row.role === 'bid';
+      const documentId = isBid ? `bid-${bidIndex + 1}` : 'tender';
+      insert.run({
+        document_id: documentId,
+        role: isBid ? 'bid' : 'tender',
+        source: row.source || 'upload',
+        file_name: row.file_name || (isBid ? '投标文件' : '招标文件'),
+        markdown_path: row.markdown_path || (isBid ? 'rejection-check/bid.md' : 'rejection-check/tender.md'),
+        content_hash: row.content_hash || '',
+        content_chars: Number(row.content_chars || 0),
+        parser_label: row.parser_label || null,
+        sort_order: isBid ? bidIndex : 0,
+        imported_at: row.imported_at || new Date().toISOString(),
+        updated_at: row.updated_at || new Date().toISOString(),
+      });
+      if (isBid) bidIndex += 1;
+    }
+    db.exec('DROP TABLE rejection_check_documents_legacy_v12');
+  } else {
+    addColumnIfMissing(db, 'rejection_check_documents', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+    createRejectionCheckSchema(db);
+  }
+
+  addColumnIfMissing(db, 'rejection_check_documents', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_rejection_check_documents_role_order
+    ON rejection_check_documents(role, sort_order);
+  `);
+
+  addColumnIfMissing(db, 'rejection_check_risk_findings', 'bid_document_id', 'TEXT');
+  addColumnIfMissing(db, 'rejection_check_typo_findings', 'bid_document_id', 'TEXT');
+  addColumnIfMissing(db, 'rejection_check_logic_findings', 'bid_document_id', 'TEXT');
+  const firstBid = db.prepare("SELECT document_id FROM rejection_check_documents WHERE role = 'bid' ORDER BY sort_order ASC LIMIT 1").get();
+  if (firstBid?.document_id) {
+    db.prepare('UPDATE rejection_check_risk_findings SET bid_document_id = ? WHERE bid_document_id IS NULL OR bid_document_id = ?').run(firstBid.document_id, '');
+    db.prepare('UPDATE rejection_check_typo_findings SET bid_document_id = ? WHERE bid_document_id IS NULL OR bid_document_id = ?').run(firstBid.document_id, '');
+    db.prepare('UPDATE rejection_check_logic_findings SET bid_document_id = ? WHERE bid_document_id IS NULL OR bid_document_id = ?').run(firstBid.document_id, '');
+  }
+}
+
+function createWorkspaceV2Schema(db) {
+  createDuplicateCheckSchema(db);
+  createRejectionCheckSchema(db);
+}
+
+function createKnowledgeBaseSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_folders (
+      folder_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_folders_order
+    ON knowledge_folders(sort_order, created_at);
+
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+      document_id TEXT PRIMARY KEY,
+      folder_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      document_dir TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      markdown_path TEXT NOT NULL,
+      markdown_hash TEXT,
+      markdown_chars INTEGER NOT NULL DEFAULT 0,
+      source_extension TEXT,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      message TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      item_count INTEGER NOT NULL DEFAULT 0,
+      block_count INTEGER NOT NULL DEFAULT 0,
+      filtered_block_count INTEGER NOT NULL DEFAULT 0,
+      candidate_item_count INTEGER NOT NULL DEFAULT 0,
+      discarded_block_count INTEGER NOT NULL DEFAULT 0,
+      system_discarded_after_retry_count INTEGER NOT NULL DEFAULT 0,
+      last_batch_size INTEGER,
+      parser_label TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (folder_id) REFERENCES knowledge_folders(folder_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_folder_order
+    ON knowledge_documents(folder_id, sort_order, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_status
+    ON knowledge_documents(status);
+
+    CREATE TABLE IF NOT EXISTS knowledge_blocks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL,
+      block_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      heading_path_json TEXT,
+      content TEXT NOT NULL,
+      content_chars INTEGER NOT NULL DEFAULT 0,
+      is_filtered INTEGER NOT NULL DEFAULT 0,
+      filter_reason TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE,
+      UNIQUE(document_id, block_id, is_filtered)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_blocks_document_order
+    ON knowledge_blocks(document_id, is_filtered, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_blocks_block_id
+    ON knowledge_blocks(document_id, block_id);
+
+    CREATE TABLE IF NOT EXISTS knowledge_candidate_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      source TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE,
+      UNIQUE(document_id, item_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_candidate_items_document_order
+    ON knowledge_candidate_items(document_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS knowledge_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      resume TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_file TEXT,
+      content_chars INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE,
+      UNIQUE(document_id, item_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_document_order
+    ON knowledge_items(document_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_title
+    ON knowledge_items(title);
+
+    CREATE TABLE IF NOT EXISTS knowledge_item_blocks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      block_id TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE,
+      UNIQUE(document_id, item_id, block_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_item_blocks_item_order
+    ON knowledge_item_blocks(document_id, item_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_item_blocks_block
+    ON knowledge_item_blocks(document_id, block_id);
+
+    CREATE TABLE IF NOT EXISTS knowledge_discarded_groups (
+      group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      block_ids_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_discarded_document_order
+    ON knowledge_discarded_groups(document_id, source, sort_order);
+
+    CREATE TABLE IF NOT EXISTS knowledge_reports (
+      document_id TEXT PRIMARY KEY,
+      total_blocks INTEGER NOT NULL DEFAULT 0,
+      filtered_blocks_count INTEGER NOT NULL DEFAULT 0,
+      candidate_items_count INTEGER NOT NULL DEFAULT 0,
+      final_items_count INTEGER NOT NULL DEFAULT 0,
+      matched_blocks_count INTEGER NOT NULL DEFAULT 0,
+      discarded_blocks_count INTEGER NOT NULL DEFAULT 0,
+      system_discarded_after_retry_count INTEGER NOT NULL DEFAULT 0,
+      new_items_from_recovery_count INTEGER NOT NULL DEFAULT 0,
+      recovery_attempt_count INTEGER NOT NULL DEFAULT 0,
+      batch_size INTEGER NOT NULL DEFAULT 20,
+      coverage_rate REAL NOT NULL DEFAULT 0,
+      matched_rate REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge_document_steps (
+      document_id TEXT NOT NULL,
+      step_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'idle',
+      result_json TEXT,
+      error TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (document_id, step_key),
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_document_steps_status
+    ON knowledge_document_steps(document_id, status);
+
+    CREATE TABLE IF NOT EXISTS knowledge_match_batches (
+      document_id TEXT NOT NULL,
+      batch_index INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'idle',
+      item_ids_json TEXT NOT NULL DEFAULT '[]',
+      matches_json TEXT,
+      error TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (document_id, batch_index),
+      FOREIGN KEY (document_id) REFERENCES knowledge_documents(document_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_match_batches_status
+    ON knowledge_match_batches(document_id, status, batch_index);
+  `);
+}
+
+/** 创建单企业资信库及其图片索引。 */
+function createCredentialLibrarySchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS credential_library_profile (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      company_name TEXT,
+      unified_social_credit_code TEXT,
+      phone TEXT,
+      email TEXT,
+      legal_representative TEXT,
+      registered_capital TEXT,
+      operating_period_start TEXT,
+      operating_period_end TEXT,
+      address TEXT,
+      business_scope TEXT,
+      industry TEXT,
+      company_type TEXT,
+      insured_employee_count TEXT,
+      company_intro TEXT,
+      tax_certificate_date TEXT,
+      tax_certificate_note TEXT,
+      audit_report_date TEXT,
+      audit_report_note TEXT,
+      social_security_certificate_date TEXT,
+      social_security_certificate_note TEXT,
+      bank_account_name TEXT,
+      bank_account_number TEXT,
+      bank_name TEXT,
+      bank_routing_number TEXT,
+      watermark_enabled INTEGER NOT NULL DEFAULT 0,
+      watermark_content TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credential_library_certificates (
+      certificate_id TEXT PRIMARY KEY,
+      name TEXT,
+      number TEXT,
+      validity_mode TEXT,
+      valid_from TEXT,
+      valid_to TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credential_library_employees (
+      employee_id TEXT PRIMARY KEY,
+      name TEXT,
+      id_number TEXT,
+      position TEXT,
+      professional_title TEXT,
+      gender TEXT,
+      phone TEXT,
+      id_validity_mode TEXT,
+      id_valid_from TEXT,
+      id_valid_to TEXT,
+      education TEXT,
+      school TEXT,
+      major TEXT,
+      introduction TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credential_library_projects (
+      project_id TEXT PRIMARY KEY,
+      project_name TEXT,
+      project_number TEXT,
+      customer_name TEXT,
+      project_type TEXT,
+      project_manager TEXT,
+      contract_amount TEXT,
+      start_date TEXT,
+      end_date TEXT,
+      project_status TEXT,
+      introduction TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credential_library_other_materials (
+      material_id TEXT PRIMARY KEY,
+      name TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS credential_library_images (
+      image_id TEXT PRIMARY KEY,
+      owner_type TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      field_key TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      custom_name TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_credential_library_images_owner
+    ON credential_library_images(owner_type, owner_id, field_key, sort_order, created_at);
+  `);
+}
+
+/** 为员工档案增加身份证有效期模式，并按产品约定清除旧日期。 */
+function addCredentialEmployeeIdValidityMode(db) {
+  addColumnIfMissing(db, 'credential_library_employees', 'id_validity_mode', 'TEXT');
+  db.exec(`
+    UPDATE credential_library_employees
+    SET id_validity_mode = '', id_valid_from = '', id_valid_to = '';
+  `);
+}
+
+/** 为技术方案生成配置增加正文模板选择。 */
+function addTechnicalPlanContentGenerationTemplate(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'content_generation_template_id', "TEXT NOT NULL DEFAULT 'standard-document'");
+}
+
+/** 合并导出模板与排版风格后，移除不再使用的正文模板选择。 */
+function removeTechnicalPlanContentGenerationTemplate(db) {
+  if (!getExistingTables(db).has('technical_plan_generation_config')) return;
+  if (!getExistingColumns(db, 'technical_plan_generation_config').has('content_generation_template_id')) return;
+  db.exec('ALTER TABLE technical_plan_generation_config DROP COLUMN content_generation_template_id');
+}
+
+/** 为技术方案生成配置增加 Word 导出模板选择。 */
+function addTechnicalPlanExportTemplate(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'export_template_id', "TEXT NOT NULL DEFAULT ''");
+}
+
+/** 为导出模板增加系统预设标记，系统预设模板不可编辑不可删除。 */
+function addExportTemplateIsSystem(db) {
+  addColumnIfMissing(db, 'export_templates', 'is_system', 'INTEGER NOT NULL DEFAULT 0');
+}
+
+/** 为项目增加模板样式范围，新旧项目未设置时均仅应用于 AI 生成目录。 */
+function addTechnicalPlanExportTemplateScope(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'export_template_scope', "TEXT NOT NULL DEFAULT 'ai-only'");
+}
+
+/** 保存配图比例，默认 30%。 */
+function addTechnicalPlanImageQuantity(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'image_quantity', "INTEGER NOT NULL DEFAULT 30");
+}
+
+/** 将配图比例列统一改为整数并恢复默认 30%，不转换或保留旧值。 */
+function migrateTechnicalPlanImageQuantity(db) {
+  db.exec(`
+    ALTER TABLE technical_plan_generation_config DROP COLUMN image_quantity;
+    ALTER TABLE technical_plan_generation_config ADD COLUMN image_quantity INTEGER NOT NULL DEFAULT 30;
+  `);
+}
+
+/** 保存正文可选修复开关；默认不执行二次优化或字数修复。 */
+function addTechnicalPlanRepairOptions(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'html_image_optimization', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'word_count_repair', 'INTEGER NOT NULL DEFAULT 0');
+}
+
+/** 保存正文格式自检开关；默认跳过格式自检补写，直接转换 Word。 */
+function addTechnicalPlanLayoutCheckOption(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'layout_check', 'INTEGER NOT NULL DEFAULT 0');
+}
+
+/** 保存目标页数与生成后自然化开关；现有成稿不会因迁移自动触发任务。 */
+function addTechnicalPlanPageAndNaturalizeOptions(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'target_pages', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'naturalize_writing', 'INTEGER NOT NULL DEFAULT 1');
+}
+
+/** 页数/字数双模式独立保存；旧 v43 数据仅按既有目标页数推断模式。 */
+function addTechnicalPlanPageRangeMode(db) {
+  const columns = getExistingColumns(db, 'technical_plan_generation_config');
+  const needsModeMigration = !columns.has('word_control_mode');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'word_control_mode', "TEXT NOT NULL DEFAULT 'pages'");
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'minimum_pages', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'maximum_pages', 'INTEGER NOT NULL DEFAULT 0');
+  if (needsModeMigration) {
+    db.exec(`
+      UPDATE technical_plan_generation_config
+      SET word_control_mode = CASE WHEN target_pages > 0 THEN 'pages' ELSE 'words' END;
+    `);
+  }
+}
+
+/** 保存四类配图布局开关；默认均未手动关闭，实际份额由配图比例档位决定。 */
+function addTechnicalPlanImageLayoutOptions(db) {
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'use_single_image_layout', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'use_image_text_layout', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'use_three_images_layout', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'technical_plan_generation_config', 'use_four_images_layout', 'INTEGER NOT NULL DEFAULT 1');
+}
+
+function createExportTemplatesSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS export_templates (
+      template_id TEXT PRIMARY KEY,
+      template_name TEXT NOT NULL,
+      config_json TEXT NOT NULL,
+      is_system INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_export_templates_updated
+    ON export_templates(updated_at DESC);
+  `);
+}
+
+function createFeasibilityReportSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feasibility_report_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      step TEXT NOT NULL DEFAULT 'materials',
+      project_info_json TEXT,
+      source_files_json TEXT,
+      analysis_markdown TEXT,
+      outline_template TEXT NOT NULL DEFAULT 'government',
+      target_words INTEGER NOT NULL DEFAULT 30000,
+      reference_document_ids_json TEXT,
+      key_parameters_markdown TEXT,
+      outline_project_name TEXT,
+      outline_project_overview TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS feasibility_report_tasks (
+      type TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      stats_json TEXT,
+      error TEXT,
+      pause_requested INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS feasibility_report_outline_nodes (
+      node_id TEXT PRIMARY KEY,
+      parent_node_id TEXT,
+      sort_order INTEGER NOT NULL,
+      level INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      knowledge_item_ids_json TEXT,
+      content TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (parent_node_id) REFERENCES feasibility_report_outline_nodes(node_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feasibility_report_outline_parent_order
+    ON feasibility_report_outline_nodes(parent_node_id, sort_order);
+
+    CREATE INDEX IF NOT EXISTS idx_feasibility_report_outline_level
+    ON feasibility_report_outline_nodes(level);
+  `);
+}
+
+function createBlindCheckSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS blind_check_meta (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      step TEXT NOT NULL DEFAULT 'upload',
+      preset_id TEXT NOT NULL DEFAULT 'builtin-general',
+      preset_tab TEXT NOT NULL DEFAULT 'page',
+      result_tab TEXT NOT NULL DEFAULT 'all',
+      use_credential_words INTEGER NOT NULL DEFAULT 1,
+      file_id TEXT,
+      file_name TEXT,
+      source_path TEXT,
+      original_path TEXT,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      file_modified_at TEXT,
+      content_hash TEXT,
+      imported_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS blind_check_presets (
+      preset_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      profile_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS blind_check_tasks (
+      type TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      stats_json TEXT,
+      error TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS blind_check_results (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL DEFAULT 'idle',
+      input_signature TEXT,
+      preset_name TEXT,
+      summary_json TEXT,
+      stats_json TEXT,
+      rule_errors_json TEXT,
+      error TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS blind_check_finding_groups (
+      group_id TEXT PRIMARY KEY,
+      rule_id TEXT NOT NULL,
+      rule_title TEXT NOT NULL,
+      category TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      message TEXT NOT NULL,
+      finding_count INTEGER NOT NULL DEFAULT 0,
+      samples_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_blind_check_finding_groups_order
+    ON blind_check_finding_groups(sort_order);
+  `);
+}
+
+function createBlindCheckFixSchema(db) {
+  addColumnIfMissing(db, 'blind_check_meta', 'fix_rules_json', 'TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS blind_check_fix_results (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL DEFAULT 'idle',
+      input_signature TEXT,
+      fix_rules_json TEXT,
+      output_path TEXT,
+      source_bytes INTEGER NOT NULL DEFAULT 0,
+      output_bytes INTEGER NOT NULL DEFAULT 0,
+      fixes_json TEXT,
+      notes_json TEXT,
+      validation_json TEXT,
+      before_summary_json TEXT,
+      before_rule_counts_json TEXT,
+      after_summary_json TEXT,
+      after_stats_json TEXT,
+      error TEXT,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS blind_check_fix_groups (
+      group_id TEXT PRIMARY KEY,
+      rule_id TEXT NOT NULL,
+      rule_title TEXT NOT NULL,
+      category TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      message TEXT NOT NULL,
+      finding_count INTEGER NOT NULL DEFAULT 0,
+      samples_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_blind_check_fix_groups_order
+    ON blind_check_fix_groups(sort_order);
+  `);
+}
+
+function addBlindCheckPresetSource(db) {
+  addColumnIfMissing(db, 'blind_check_presets', 'source_json', 'TEXT');
+}
+
+function createBlindCheckReviewSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS blind_check_reviews (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL DEFAULT 'idle',
+      input_signature TEXT,
+      tender_name TEXT,
+      review_json TEXT,
+      error TEXT,
+      updated_at TEXT
+    );
+  `);
+}
+
+// AI 复核：程序初筛后由持久 Agent 补漏、判定候选问题，修复结果与检查结果逐条对应。
+// 修复是否带 AI 修复单独记住，作为下次弹窗的默认选项；检查是否带 AI 复核沿用 ai_review_enabled。
+function addBlindCheckFixMode(db) {
+  addColumnIfMissing(db, 'blind_check_meta', 'fix_ai_enabled', 'INTEGER NOT NULL DEFAULT 1');
+}
+
+function addBlindCheckReview(db) {
+  addColumnIfMissing(db, 'blind_check_meta', 'ai_review_enabled', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing(db, 'blind_check_finding_groups', 'candidate', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'blind_check_finding_groups', 'items_json', 'TEXT');
+  addColumnIfMissing(db, 'blind_check_fix_results', 'items_json', 'TEXT');
+  addColumnIfMissing(db, 'blind_check_fix_results', 'new_groups_json', 'TEXT');
+  addColumnIfMissing(db, 'blind_check_fix_results', 'clauses_json', 'TEXT');
+  addColumnIfMissing(db, 'blind_check_fix_results', 'agent_json', 'TEXT');
+  createBlindCheckReviewSchema(db);
+}
+
+const schemaHealthTableGroups = [
+  {
+    version: 1,
+    tables: [
+      'technical_plan_meta',
+      'technical_plan_tasks',
+      'technical_plan_bid_items',
+      'technical_plan_outline_nodes',
+      'technical_plan_content_sections',
+      'technical_plan_content_plans',
+    ],
+    repair: createInitialSchema,
+  },
+  {
+    version: 2,
+    tables: [
+      'duplicate_check_meta',
+      'duplicate_check_files',
+      'duplicate_check_tasks',
+      'duplicate_check_analysis_sections',
+      'duplicate_check_content_files',
+      'duplicate_check_metadata_items',
+      'duplicate_check_outline_items',
+      'duplicate_check_outline_groups',
+      'duplicate_check_outline_pairwise',
+      'duplicate_check_content_duplicates',
+      'duplicate_check_content_occurrences',
+      'duplicate_check_image_files',
+      'duplicate_check_duplicate_images',
+      'duplicate_check_image_occurrences',
+    ],
+    repair: createDuplicateCheckSchema,
+  },
+  {
+    version: 2,
+    tables: [
+      'rejection_check_meta',
+      'rejection_check_documents',
+      'rejection_check_tasks',
+      'rejection_check_extraction',
+      'rejection_check_results',
+      'rejection_check_risk_findings',
+      'rejection_check_typo_findings',
+      'rejection_check_logic_findings',
+    ],
+    repair: createRejectionCheckSchema,
+  },
+  {
+    version: 3,
+    tables: [
+      'knowledge_folders',
+      'knowledge_documents',
+      'knowledge_blocks',
+      'knowledge_candidate_items',
+      'knowledge_items',
+      'knowledge_item_blocks',
+      'knowledge_discarded_groups',
+      'knowledge_reports',
+      'knowledge_document_steps',
+      'knowledge_match_batches',
+    ],
+    repair: createKnowledgeBaseSchema,
+  },
+  {
+    version: 4,
+    tables: ['technical_plan_global_fact_groups'],
+    repair: createTechnicalPlanGlobalFactsSchema,
+  },
+  {
+    version: 15,
+    tables: ['export_templates'],
+    repair: createExportTemplatesSchema,
+  },
+  {
+    version: 20,
+    tables: ['task_logs'],
+    repair: createTaskLogsSchema,
+  },
+  {
+    version: 23,
+    tables: ['feasibility_report_meta', 'feasibility_report_tasks', 'feasibility_report_outline_nodes'],
+    repair: createFeasibilityReportSchema,
+  },
+  { version: 24, tables: ['official_invoice_info'], repair: createOfficialInvoiceSchema },
+  {
+    version: 25,
+    tables: ['technical_plan_generation_config', 'technical_plan_generation_bid_tasks', 'technical_plan_generation_reference_docs'],
+    repair: createTechnicalPlanGenerationConfigSchema,
+  },
+  {
+    version: 26,
+    tables: [
+      'credential_library_profile',
+      'credential_library_certificates',
+      'credential_library_employees',
+      'credential_library_projects',
+      'credential_library_other_materials',
+      'credential_library_images',
+    ],
+    repair: createCredentialLibrarySchema,
+  },
+  {
+    version: 38,
+    tables: [
+      'blind_check_meta',
+      'blind_check_presets',
+      'blind_check_tasks',
+      'blind_check_results',
+      'blind_check_finding_groups',
+    ],
+    repair: createBlindCheckSchema,
+  },
+  {
+    version: 39,
+    tables: ['blind_check_fix_results', 'blind_check_fix_groups'],
+    repair: createBlindCheckFixSchema,
+  },
+  {
+    version: 41,
+    tables: ['blind_check_reviews'],
+    repair: createBlindCheckReviewSchema,
+  },
+];
+
+function removeKnowledgeMigrationMeta(db) {
+  db.exec('DROP TABLE IF EXISTS knowledge_migration_meta;');
+}
+
+const schemaHealthColumnGroups = [
+  {
+    version: 1,
+    table: 'technical_plan_meta',
+    columns: {
+      step: 'TEXT',
+      tender_file_name: 'TEXT',
+      tender_markdown_path: 'TEXT',
+      tender_markdown_hash: 'TEXT',
+      tender_markdown_chars: 'INTEGER',
+      tender_parser_label: 'TEXT',
+      tender_imported_at: 'TEXT',
+      outline_project_name: 'TEXT',
+      outline_project_overview: 'TEXT',
+      content_generation_runtime_json: 'TEXT',
+      created_at: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+  {
+    version: 5,
+    table: 'technical_plan_meta',
+    columns: {
+      current_bid_section_id: 'TEXT',
+      bid_sections_extracted: 'INTEGER',
+    },
+  },
+  {
+    version: 7,
+    table: 'technical_plan_meta',
+    columns: {
+      selected_section_id: 'TEXT',
+      selected_section_title: 'TEXT',
+      selected_section_head_line: 'TEXT',
+    },
+  },
+  {
+    version: 8,
+    table: 'technical_plan_meta',
+    columns: {
+      pending_tender_markdown_path: 'TEXT',
+      pending_tender_file_name: 'TEXT',
+      pending_tender_parser_label: 'TEXT',
+      pending_tender_sections_json: 'TEXT',
+      pending_tender_total_declared: 'INTEGER',
+      pending_tender_created_at: 'TEXT',
+    },
+  },
+  {
+    version: 9,
+    table: 'technical_plan_meta',
+    columns: {
+      original_plan_file_name: 'TEXT',
+      original_plan_markdown_path: 'TEXT',
+      original_plan_markdown_hash: 'TEXT',
+      original_plan_markdown_chars: 'INTEGER NOT NULL DEFAULT 0',
+      original_plan_parser_label: 'TEXT',
+      original_plan_imported_at: 'TEXT',
+    },
+  },
+  {
+    version: 11,
+    table: 'knowledge_documents',
+    columns: {
+      sort_order: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    version: 12,
+    table: 'rejection_check_documents',
+    columns: {
+      sort_order: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    version: 12,
+    table: 'rejection_check_risk_findings',
+    columns: {
+      bid_document_id: 'TEXT',
+    },
+  },
+  {
+    version: 12,
+    table: 'rejection_check_typo_findings',
+    columns: {
+      bid_document_id: 'TEXT',
+    },
+  },
+  {
+    version: 12,
+    table: 'rejection_check_logic_findings',
+    columns: {
+      bid_document_id: 'TEXT',
+    },
+  },
+  {
+    version: 14,
+    table: 'technical_plan_meta',
+    columns: {
+      tender_original_markdown_path: 'TEXT',
+      tender_original_markdown_hash: 'TEXT',
+      tender_original_markdown_chars: 'INTEGER NOT NULL DEFAULT 0',
+      bid_sections_json: 'TEXT',
+      bid_section_extraction_status: "TEXT NOT NULL DEFAULT 'idle'",
+      bid_section_extraction_error: 'TEXT',
+    },
+  },
+  {
+    version: 16,
+    table: 'technical_plan_meta',
+    columns: {
+      tender_files_json: 'TEXT',
+    },
+  },
+  {
+    version: 18,
+    table: 'technical_plan_meta',
+    columns: {
+      outline_word_control_snapshot_json: 'TEXT',
+    },
+  },
+  {
+    version: 19,
+    table: 'technical_plan_outline_nodes',
+    columns: {
+      content_mode: 'TEXT',
+      content_mode_note: 'TEXT',
+    },
+  },
+  {
+    version: 25,
+    table: 'technical_plan_generation_config',
+    columns: {
+      bid_analysis_mode: "TEXT NOT NULL DEFAULT 'key'",
+      bid_section_mode: "TEXT NOT NULL DEFAULT 'single'",
+      outline_mode: "TEXT NOT NULL DEFAULT 'response-file'",
+      outline_expansion_mode: "TEXT NOT NULL DEFAULT 'ai-complement'",
+      minimum_words: 'INTEGER NOT NULL DEFAULT 0',
+      maximum_words: 'INTEGER NOT NULL DEFAULT 0',
+      section_words: 'INTEGER NOT NULL DEFAULT 0',
+      global_facts_mode: "TEXT NOT NULL DEFAULT 'fabricate'",
+      use_ai_images: 'INTEGER NOT NULL DEFAULT 1',
+      use_mermaid_images: 'INTEGER NOT NULL DEFAULT 1',
+      use_html_images: 'INTEGER NOT NULL DEFAULT 1',
+      html_image_types: "TEXT NOT NULL DEFAULT ''",
+      table_requirement: "TEXT NOT NULL DEFAULT 'heavy'",
+      created_at: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+  {
+    version: 27,
+    table: 'credential_library_employees',
+    columns: {
+      id_validity_mode: 'TEXT',
+    },
+  },
+  {
+    version: 29,
+    table: 'technical_plan_generation_config',
+    columns: {
+      export_template_id: "TEXT NOT NULL DEFAULT ''",
+    },
+  },
+  {
+    version: 31,
+    table: 'export_templates',
+    columns: {
+      is_system: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    version: 32,
+    table: 'technical_plan_generation_config',
+    columns: {
+      export_template_scope: "TEXT NOT NULL DEFAULT 'ai-only'",
+    },
+  },
+  {
+    version: 33,
+    table: 'technical_plan_generation_config',
+    columns: {
+      image_quantity: "INTEGER NOT NULL DEFAULT 30",
+    },
+  },
+  {
+    version: 34,
+    table: 'technical_plan_generation_config',
+    columns: {
+      html_image_optimization: 'INTEGER NOT NULL DEFAULT 0',
+      word_count_repair: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    version: 35,
+    table: 'technical_plan_generation_config',
+    columns: {
+      layout_check: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    version: 37,
+    table: 'technical_plan_generation_config',
+    columns: {
+      use_single_image_layout: 'INTEGER NOT NULL DEFAULT 1',
+      use_image_text_layout: 'INTEGER NOT NULL DEFAULT 1',
+      use_three_images_layout: 'INTEGER NOT NULL DEFAULT 1',
+      use_four_images_layout: 'INTEGER NOT NULL DEFAULT 1',
+    },
+  },
+  {
+    version: 39,
+    table: 'blind_check_meta',
+    columns: {
+      fix_rules_json: 'TEXT',
+    },
+  },
+  {
+    version: 40,
+    table: 'blind_check_presets',
+    columns: {
+      source_json: 'TEXT',
+    },
+  },
+  {
+    version: 41,
+    table: 'blind_check_meta',
+    columns: {
+      ai_review_enabled: 'INTEGER NOT NULL DEFAULT 1',
+    },
+  },
+  {
+    version: 41,
+    table: 'blind_check_finding_groups',
+    columns: {
+      candidate: 'INTEGER NOT NULL DEFAULT 0',
+      items_json: 'TEXT',
+    },
+  },
+  {
+    version: 41,
+    table: 'blind_check_fix_results',
+    columns: {
+      items_json: 'TEXT',
+      new_groups_json: 'TEXT',
+      clauses_json: 'TEXT',
+      agent_json: 'TEXT',
+    },
+  },
+  {
+    version: 42,
+    table: 'blind_check_meta',
+    columns: {
+      fix_ai_enabled: 'INTEGER NOT NULL DEFAULT 1',
+    },
+  },
+  {
+    version: 43,
+    table: 'technical_plan_generation_config',
+    columns: {
+      target_pages: 'INTEGER NOT NULL DEFAULT 0',
+      naturalize_writing: 'INTEGER NOT NULL DEFAULT 1',
+    },
+  },
+  {
+    version: 44,
+    table: 'technical_plan_generation_config',
+    columns: {
+      word_control_mode: "TEXT NOT NULL DEFAULT 'pages'",
+      minimum_pages: 'INTEGER NOT NULL DEFAULT 0',
+      maximum_pages: 'INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+];
+
+function quoteIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function getExistingTables(db) {
+  return new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+}
+
+function getExistingColumns(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${quoteIdentifier(tableName)})`).all().map((row) => row.name));
+}
+
+function emitDatabaseStatus(onStatus, status) {
+  if (typeof onStatus === 'function') {
+    onStatus(status);
+  }
+}
+
+function ensureWorkspaceSchemaHealth(db, targetVersion = schemaVersion, onStatus) {
+  emitDatabaseStatus(onStatus, {
+    phase: 'checking',
+    message: '正在检查本地数据库结构',
+    targetVersion,
+  });
+  let existingTables = getExistingTables(db);
+  for (const group of schemaHealthTableGroups) {
+    if (group.version > targetVersion) continue;
+    if (group.tables.every((tableName) => existingTables.has(tableName))) continue;
+    emitDatabaseStatus(onStatus, {
+      phase: 'repairing',
+      message: '正在修复本地数据库表结构',
+      targetVersion,
+    });
+    group.repair(db);
+    existingTables = getExistingTables(db);
+  }
+
+  const columnCache = new Map();
+  for (const group of schemaHealthColumnGroups) {
+    if (group.version > targetVersion || !existingTables.has(group.table)) continue;
+    let existingColumns = columnCache.get(group.table);
+    if (!existingColumns) {
+      existingColumns = getExistingColumns(db, group.table);
+      columnCache.set(group.table, existingColumns);
+    }
+    for (const [columnName, columnType] of Object.entries(group.columns)) {
+      if (existingColumns.has(columnName)) continue;
+      emitDatabaseStatus(onStatus, {
+        phase: 'repairing',
+        message: '正在修复本地数据库字段',
+        targetVersion,
+      });
+      db.exec(`ALTER TABLE ${quoteIdentifier(group.table)} ADD COLUMN ${quoteIdentifier(columnName)} ${columnType}`);
+      existingColumns.add(columnName);
+    }
+  }
+  if (targetVersion >= 17 && existingTables.has('technical_plan_content_plans')) {
+    removeLegacyTechnicalPlanIllustrationType(db);
+  }
+}
+
+const migrations = [
+  {
+    version: 1,
+    description: '创建技术方案 SQLite 初始表结构',
+    up: createInitialSchema,
+  },
+  {
+    version: 2,
+    description: '新增标书查重和废标项检查 SQLite 表结构',
+    up: createWorkspaceV2Schema,
+  },
+  {
+    version: 3,
+    description: '新增知识库 SQLite 表结构',
+    up: createKnowledgeBaseSchema,
+  },
+  {
+    version: 4,
+    description: '新增技术方案全局事实表结构',
+    up: createTechnicalPlanGlobalFactsSchema,
+  },
+  {
+    version: 5,
+    description: '技术方案新增标段选择字段',
+    up: addTechnicalPlanBidSectionV6Compat,
+  },
+  {
+    version: 6,
+    description: '兼容旧版标段字段（幂等）',
+    up: addTechnicalPlanBidSectionV6Compat,
+  },
+  {
+    version: 7,
+    description: '技术方案新增标段选择字段（selected_section）',
+    up: addTechnicalPlanSelectedSection,
+  },
+  {
+    version: 8,
+    description: '技术方案新增待选择标段恢复状态',
+    up: addTechnicalPlanPendingTenderSelection,
+  },
+  {
+    version: 9,
+    description: '技术方案新增原方案文件状态',
+    up: addTechnicalPlanOriginalPlan,
+  },
+  {
+    version: 10,
+    description: '技术方案新增招标解析项选择配置',
+    up: addTechnicalPlanBidAnalysisSelection,
+  },
+  {
+    version: 11,
+    description: '知识库文档新增手动排序字段',
+    up: addKnowledgeDocumentSortOrder,
+  },
+  {
+    version: 12,
+    description: '废标项检查支持多份投标文件',
+    up: migrateRejectionCheckMultiBidDocuments,
+  },
+  {
+    version: 13,
+    description: '技术方案新增已有方案目录使用方式配置',
+    up: addTechnicalPlanOutlineExpansionMode,
+  },
+  {
+    version: 14,
+    description: '技术方案新增多标段优化状态',
+    up: addTechnicalPlanBidSectionOptimization,
+  },
+  {
+    version: 15,
+    description: '新增导出模板库表结构',
+    up: createExportTemplatesSchema,
+  },
+  {
+    version: 16,
+    description: '技术方案支持多份招标文件',
+    up: addTechnicalPlanTenderFiles,
+  },
+  {
+    version: 17,
+    description: '技术方案新增全文图片编排结果',
+    up: addTechnicalPlanIllustrationPlan,
+  },
+  {
+    version: 18,
+    description: '技术方案新增目录字数控制设置和生效快照',
+    up: addTechnicalPlanOutlineWordControl,
+  },
+  {
+    version: 19,
+    description: '技术方案目录叶子新增内容处理模式',
+    up: addTechnicalPlanOutlineContentMode,
+  },
+  {
+    version: 20,
+    description: '任务日志按行存储',
+    up: createTaskLogsSchema,
+  },
+  {
+    version: 21,
+    description: '移除废弃的知识库旧数据迁移状态',
+    up: removeKnowledgeMigrationMeta,
+  },
+  {
+    version: 22,
+    description: '技术方案新增全局事实补全模式',
+    up: addTechnicalPlanGlobalFactsMode,
+  },
+  {
+    version: 23,
+    description: '新增可行性研究报告工作区表结构',
+    up: createFeasibilityReportSchema,
+  },
+  { version: 24, description: '新增官方 API 开票信息', up: createOfficialInvoiceSchema },
+  {
+    version: 25,
+    description: '统一技术方案生成配置存储',
+    up: unifyTechnicalPlanGenerationConfig,
+  },
+  {
+    version: 26,
+    description: '新增单企业资信库表结构',
+    up: createCredentialLibrarySchema,
+  },
+  {
+    version: 27,
+    description: '员工档案新增身份证有效期模式',
+    up: addCredentialEmployeeIdValidityMode,
+  },
+  {
+    version: 28,
+    description: '技术方案新增正文生成模板配置',
+    up: addTechnicalPlanContentGenerationTemplate,
+  },
+  {
+    version: 29,
+    description: '技术方案新增 Word 导出模板配置',
+    up: addTechnicalPlanExportTemplate,
+  },
+  {
+    version: 30,
+    description: '技术方案移除正文生成模板配置',
+    up: removeTechnicalPlanContentGenerationTemplate,
+  },
+  {
+    version: 31,
+    description: '导出模板新增系统预设标记',
+    up: addExportTemplateIsSystem,
+  },
+  {
+    version: 32,
+    description: '技术方案新增导出模板样式范围配置',
+    up: addTechnicalPlanExportTemplateScope,
+  },
+  {
+    version: 33,
+    description: '技术方案新增图片数量配置',
+    up: addTechnicalPlanImageQuantity,
+  },
+  {
+    version: 34,
+    description: '技术方案新增 HTML 图片二次优化和字数不达标修复开关',
+    up: addTechnicalPlanRepairOptions,
+  },
+  {
+    version: 35,
+    description: '技术方案新增格式自检及修复开关',
+    up: addTechnicalPlanLayoutCheckOption,
+  },
+  {
+    version: 36,
+    description: '技术方案配图比例字段升级为整数并恢复默认 30%',
+    up: migrateTechnicalPlanImageQuantity,
+  },
+  {
+    version: 37,
+    description: '技术方案新增配图布局开关',
+    up: addTechnicalPlanImageLayoutOptions,
+  },
+  {
+    version: 38,
+    description: '新增暗标合规检查',
+    up: createBlindCheckSchema,
+  },
+  {
+    version: 39,
+    description: '暗标合规检查新增自动修复',
+    up: createBlindCheckFixSchema,
+  },
+  {
+    version: 40,
+    description: '暗标格式预设记录 AI 提取出处',
+    up: addBlindCheckPresetSource,
+  },
+  {
+    version: 41,
+    description: '暗标合规检查新增 AI 复核',
+    up: addBlindCheckReview,
+  },
+  {
+    version: 42,
+    description: '暗标自动修复记住是否带 AI 修复',
+    up: addBlindCheckFixMode,
+  },
+  {
+    version: 43,
+    description: '技术方案新增目标页数与生成后自然化配置',
+    up: addTechnicalPlanPageAndNaturalizeOptions,
+  },
+  {
+    version: 44,
+    description: '技术方案新增页数与字数双模式及页数范围',
+    up: addTechnicalPlanPageRangeMode,
+  },
+];
+
+function timestampForFileName() {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/T/, '-').replace(/\..*$/, '');
+}
+
+function copyIfExists(source, target) {
+  if (fs.existsSync(source)) {
+    fs.copyFileSync(source, target);
+  }
+}
+
+function backupDatabaseFiles(db, databasePath, onStatus) {
+  if (!fs.existsSync(databasePath)) {
+    return;
+  }
+
+  emitDatabaseStatus(onStatus, {
+    phase: 'backing-up',
+    message: '正在备份本地数据库',
+  });
+  db.pragma('wal_checkpoint(TRUNCATE)');
+  const suffix = `backup-${timestampForFileName()}`;
+  copyIfExists(databasePath, `${databasePath}.${suffix}`);
+  copyIfExists(`${databasePath}-wal`, `${databasePath}-wal.${suffix}`);
+  copyIfExists(`${databasePath}-shm`, `${databasePath}-shm.${suffix}`);
+}
+
+// 数据库升级成功后，统一删除当前数据库积累的全部历史备份。
+function clearDatabaseBackupFiles(databasePath) {
+  const directory = path.dirname(databasePath);
+  const databaseName = path.basename(databasePath);
+  const backupPrefixes = [
+    `${databaseName}.backup-`,
+    `${databaseName}-wal.backup-`,
+    `${databaseName}-shm.backup-`,
+  ];
+
+  for (const fileName of fs.readdirSync(directory)) {
+    if (!backupPrefixes.some((prefix) => fileName.startsWith(prefix))) continue;
+    try {
+      fs.unlinkSync(path.join(directory, fileName));
+    } catch (error) {
+      console.warn(`[sqlite] 删除数据库备份失败：${fileName}`, error?.message || String(error));
+    }
+  }
+}
+
+function applyMigrations(db, databasePath, onStatus) {
+  const currentVersion = Number(db.pragma('user_version', { simple: true }) || 0);
+  if (currentVersion > schemaVersion) {
+    throw new Error(`本地数据库版本 ${currentVersion} 高于当前客户端支持版本 ${schemaVersion}，请升级客户端后再使用技术方案功能。`);
+  }
+  if (currentVersion === schemaVersion) {
+    ensureWorkspaceSchemaHealth(db, schemaVersion, onStatus);
+    return;
+  }
+
+  if (currentVersion > 0) {
+    backupDatabaseFiles(db, databasePath, onStatus);
+  }
+
+  const runMigration = db.transaction((migration) => {
+    migration.up(db);
+    db.pragma(`user_version = ${migration.version}`);
+  });
+
+  for (const migration of migrations.filter((item) => item.version > currentVersion).sort((a, b) => a.version - b.version)) {
+    try {
+      ensureWorkspaceSchemaHealth(db, migration.version - 1, onStatus);
+      emitDatabaseStatus(onStatus, {
+        phase: 'upgrading',
+        message: `正在升级本地数据库（v${migration.version}）`,
+        currentVersion,
+        targetVersion: migration.version,
+        migrationVersion: migration.version,
+        migrationDescription: migration.description,
+      });
+      runMigration(migration);
+      ensureWorkspaceSchemaHealth(db, migration.version, onStatus);
+    } catch (error) {
+      throw new Error(`数据库升级失败（v${migration.version} ${migration.description}）：${error.message || String(error)}`);
+    }
+  }
+
+  ensureWorkspaceSchemaHealth(db, schemaVersion, onStatus);
+  clearDatabaseBackupFiles(databasePath);
+}
+
+function createSqliteDatabase(app, options = {}) {
+  const databasePath = getWorkspaceDatabasePath(app);
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const db = new Database(databasePath);
+
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
+  try {
+    applyMigrations(db, databasePath, options.onStatus);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+
+  const close = () => {
+    if (db.open) {
+      db.close();
+    }
+  };
+
+  app.once('will-quit', close);
+
+  return {
+    db,
+    path: databasePath,
+    schemaVersion,
+    close,
+  };
+}
+
+module.exports = {
+  createSqliteDatabase,
+  schemaVersion,
+};

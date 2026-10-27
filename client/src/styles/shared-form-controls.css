@@ -1,0 +1,72 @@
+/* 亮色 v2 的基础输入外观。:where 保持低优先级，业务页面仍可按需要覆写。 */
+:where(
+    input[type='text'],
+    input[type='email'],
+    input[type='password'],
+    input[type='url'],
+    input[type='search'],
+    input[type='number'],
+    textarea,
+    select
+  ) {
+  color: var(--yb-text);
+  background-color: #ffffff;
+  border: 1px solid #cbd9e9;
+  border-radius: var(--yb-radius-md);
+  transition: border-color var(--yb-duration-fast) ease, box-shadow var(--yb-duration-fast) ease,
+    background-color var(--yb-duration-fast) ease;
+}
+
+:where(
+    input[type='text'],
+    input[type='email'],
+    input[type='password'],
+    input[type='url'],
+    input[type='search'],
+    input[type='number'],
+    textarea,
+    select
+  ):hover:not(:disabled) {
+  border-color: #a9c2e0;
+}
+
+:where(
+    input[type='text'],
+    input[type='email'],
+    input[type='password'],
+    input[type='url'],
+    input[type='search'],
+    input[type='number'],
+    textarea,
+    select
+  ):focus {
+  background-color: #ffffff;
+  border-color: var(--yb-primary);
+  outline: none;
+  box-shadow: var(--yb-focus-ring);
+}
+
+:where(
+    input[type='text'],
+    input[type='email'],
+    input[type='password'],
+    input[type='url'],
+    input[type='search'],
+    input[type='number'],
+    textarea,
+    select
+  ):disabled {
+  color: var(--yb-text-muted);
+  background-color: #f3f6fa;
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+
+:where(input, textarea)::placeholder {
+  color: #9aa9bb;
+}
+
+:where(label, legend) {
+  color: var(--yb-text);
+}
+
