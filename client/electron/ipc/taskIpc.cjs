@@ -85,6 +85,7 @@ function registerTaskIpc({ taskService }) {
     taskService.subscribe(event.sender);
     return taskService.getActiveTasks();
   });
+  ipcMain.handle('tasks:get-usage', (_event, taskId) => taskService.getTaskUsage(taskId));
   ipcMain.on('tasks:subscribe', (event) => {
     taskService.subscribe(event.sender);
   });

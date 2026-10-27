@@ -1,4 +1,4 @@
-export type TextModelProvider = 'official' | 'jinlong' | 'volcengine' | 'deepseek' | 'agnes' | 'custom';
+export type TextModelProvider = 'official' | 'jinlong' | 'volcengine' | 'deepseek' | 'agnes' | 'glm' | 'custom';
 export type AiRequestMode = 'normal' | 'stream';
 export type UpdateChannel = 'github' | 'cloudflare' | 'atomgit';
 

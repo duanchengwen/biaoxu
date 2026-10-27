@@ -10,17 +10,24 @@ const { AI_QUEUE_SCOPE_PAUSED } = require('../utils/aiRequestQueue.cjs');
 const { AI_UPSTREAM_UNAVAILABLE, createAiBatchGuard, isBatchCancelled } = require('../utils/aiBatchGuard.cjs');
 const { NATURAL_WRITING_STANDARD } = require('./contentGenerationWritingStyle.cjs');
 
-// 修改较多小节时通过 repair-sections 并发派发；主 Agent 也可直接修改少量小节，结果在提交时校验。
-const CONSISTENCY_TOOLS = [...NATIVE_AGENT_TOOLS, 'ask-user', 'search-sections', 'recheck-sections', 'repair-sections', 'complete-consistency-round', SUBMISSION_FIX_TOOL, 'report-failure'];
+// 一致性阶段使用程序生成的全量事实台账、语义候选和定点检索，不再开放 bash/grep/find/ls
+// 让主 Agent 反复编写脚本遍历同一批正文。read 是结构化步骤失败时读取原始台账的显式
+// 保底；write/edit 保留既有任务文件与少量定点修复能力，不降低审计或恢复能力。
+const CONSISTENCY_NATIVE_TOOLS = NATIVE_AGENT_TOOLS.filter(name => ['read', 'write', 'edit'].includes(name));
+const CONSISTENCY_TOOLS = [...CONSISTENCY_NATIVE_TOOLS, 'ask-user', 'search-sections', 'recheck-sections', 'repair-sections', 'complete-consistency-round', SUBMISSION_FIX_TOOL, 'report-failure'];
 const LEDGER_JSON = '正文一致性事实台账.json';
 const LEDGER_FILE = '正文一致性事实台账.md';
+const CONSISTENCY_ISSUES_FILE = '正文一致性问题清单.md';
+const SEMANTIC_REVIEW_JSON = '正文一致性语义候选.json';
+const SEMANTIC_REVIEW_FILE = '正文一致性语义候选.md';
 // 核对口径或台账结构变化时递增，旧缓存整体失效。
 const LEDGER_VERSION = 3;
+const SEMANTIC_REVIEW_VERSION = 3;
 const ISSUE_TYPES = ['与全局事实冲突', '小节内部矛盾'];
 const FACT_CATEGORIES = ['人数与数量', '日期与期限', '频次与时限', '地点与范围', '金额', '技术参数', '编号与名称', '责任归属', '其他'];
 const SEARCH_LIMIT = 80;
 const SNIPPET_LENGTH = 400;
-const REPAIR_INSTRUCTIONS = '只修复主 Agent 指定的矛盾及本批统一修复规则涉及的内容，遵循其统一结论，只改与矛盾直接相关的数值或陈述，其他用词、称谓和表述保持原样，不检查或调整总字数。主 Agent 给出的段落 ID 只用于定位：问题文字不在该段时，在本节内按语义找到同一问题所在位置修改，不因段落 ID 不符而失败；指定问题在本节已不存在（例如已经修复）时不修改，简短说明后结束；本轮修改后提交真实结果，未完全消除的矛盾交由主 Agent 统一验收；只有无法继续执行的实际阻断才调用 report-failure。';
+const REPAIR_INSTRUCTIONS = '修复主 Agent 指定的矛盾及本批统一修复规则涉及的内容，遵循其统一结论，只改与矛盾直接相关的数值或陈述；若本节任务另附“同时处理的自然文风问题”，在同一次编辑中只调整所列段落的对应表达，不另做全节润色。除此以外，其他用词、称谓和表述保持原样，不检查或调整总字数。主 Agent 给出的段落 ID 只用于定位：问题文字不在该段时，在本节内按语义找到同一问题所在位置修改，不因段落 ID 不符而失败；指定问题在本节已不存在（例如已经修复）时不修改，简短说明后结束；本轮修改后提交真实结果，未完全消除的矛盾交由主 Agent 统一验收；只有无法继续执行的实际阻断才调用 report-failure。';
 const RULE_CHECK_INSTRUCTIONS = '本节无单独指定问题：按本批统一修复规则在本节全文按语义自查，发现相关表述即按规则修改；没有相关内容时不修改，直接简短回复“本节无需修改”结束。';
 
 // ID 抄错时给出开头相同的目标小节（至少前 8 位或整段相同），便于主 Agent 直接改正后重新派发。
@@ -166,6 +173,35 @@ function buildLedgerMarkdown(sections, ledger) {
   ].join('\n');
 }
 
+// Main Agent normally needs only explicit per-section issues and extraction failures. Keeping
+// this separate prevents a default read from also pulling thousands of facts into its context.
+// The full ledger remains available only for semantic-review failure or targeted evidence work.
+function buildIssuesMarkdown(sections, ledger) {
+  const incremental = sections.some(section => section.reference);
+  const label = section => `${section.number} ${section.title}`;
+  const issues = sections.filter(section => !section.reference && ledger.sections?.[section.id])
+    .flatMap(section => (ledger.sections[section.id].issues || []).map(issue => ({ section, issue })));
+  const failed = sections.filter(section => !ledger.sections?.[section.id]);
+  return [
+    '# 正文一致性问题清单',
+    '本文件只列程序逐节核对发现的明确问题和核对失败小节。跨小节语义候选另见《正文一致性语义候选.md》；完整事实仅在结构化比对失败时回到原始台账复核。',
+    '',
+    `## ${incremental ? '本轮目标' : ''}小节明确问题（共 ${issues.length} 项）`,
+    ...(issues.length ? issues.map(({ section, issue }, index) => `${index + 1}. [${label(section)}｜${section.id}｜${issue.block_id || '未定位'}] ${issue.type}：${issue.problem}；依据：${issue.evidence}；建议：${issue.suggestion}`) : ['无']),
+    '',
+    `## 核对失败小节（共 ${failed.length} 节）`,
+    ...(failed.length ? [
+      '这些小节的问题与事实未进入结构化结果；先用 recheck-sections 重试，仍失败时定点读取原文并在提交时列入 manually_checked_section_ids。',
+      ...failed.map(section => `- ${label(section)}｜小节 ID：${section.id}｜文件：${section.file}｜原因：${ledger.failures?.[section.id] || '尚未核对'}`),
+    ] : ['无']),
+  ].join('\n');
+}
+
+function writeLedgerReports(workspaceDir, sections, ledger) {
+  writeWorkspaceFile(workspaceDir, LEDGER_FILE, buildLedgerMarkdown(sections, ledger));
+  writeWorkspaceFile(workspaceDir, CONSISTENCY_ISSUES_FILE, buildIssuesMarkdown(sections, ledger));
+}
+
 // 全轮相同的核对规则放在 system，只提供全局事实公共段和本节正文，便于并发请求复用前缀缓存。
 function buildExtractionSystem() {
   return `你负责投标正文一致性审计中的单小节核对，只处理本次请求提供的一个小节，不改写正文。一致性审计只关注两类问题：正文前后矛盾，以及正文与全局事实设定冲突。任务包括两部分。
@@ -291,10 +327,185 @@ async function extractConsistencyLedger({ aiService, workspaceDir, signal, onAct
     await checkLedgerSections({ aiService, workspaceDir, ledger, pending, total: sections.length, signal, onActivity,
       onChecked: () => onProgress(done(), sections.length) });
   }
-  writeWorkspaceFile(workspaceDir, LEDGER_FILE, buildLedgerMarkdown(sections, ledger));
+  writeLedgerReports(workspaceDir, sections, ledger);
   const failed = Object.keys(ledger.failures).length;
   reportExtraction(onActivity, sections.length, [], { label: failed ? `小节事实核对完成，${failed} 节核对失败交由主 Agent 处理` : '小节事实核对完成', done: true });
+  Object.defineProperty(ledger, 'rechecked_section_ids', { value: pending.map(section => section.id), enumerable: false });
   return ledger;
+}
+
+async function refreshConsistencyAfterRepairs(options) {
+  const ledger = await extractConsistencyLedger({ ...options, checkChanges: true });
+  const recheckedIds = ledger.rechecked_section_ids || [];
+  return {
+    ledger,
+    recheckedIds,
+    failedIds: recheckedIds.filter(id => ledger.failures?.[id]),
+    remainingIssueIds: recheckedIds.filter(id => ledger.sections?.[id]?.issues?.length),
+  };
+}
+
+function semanticReviewInput(sections, ledger) {
+  const aliases = new Map(sections.map((section, index) => [section.id, `S${index + 1}`]));
+  // Section identity/title appears once; facts use compact tuples so a 60+ section document
+  // does not repeat UUIDs and JSON property names thousands of times.
+  let factIndex = 0;
+  return {
+    sections: sections.map(section => [aliases.get(section.id), section.id, section.number || '', section.title || '', section.reference ? 1 : 0]),
+    facts: Object.entries(ledger.sections || {}).flatMap(([sectionId, entry]) => (entry.facts || [])
+      .map(fact => [++factIndex, aliases.get(sectionId), fact.category, fact.subject, fact.value, fact.block_id || '', fact.quote || ''])),
+  };
+}
+
+function estimateTextTokens(text) {
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const character of String(text || '')) {
+    if (character.codePointAt(0) <= 0x7f) ascii += 1;
+    else nonAscii += 1;
+  }
+  return nonAscii + Math.ceil(ascii / 3);
+}
+
+function semanticReviewSystem() {
+  return `你负责比对投标正文事实台账中的全部事实，只识别不同小节之间不能同时成立的明确矛盾，不改写正文。程序提供所有类别的完整事实。sections 每项为 [小节别名,小节ID,编号,标题,是否参考]；facts 每项为 [事实引用,小节别名,类别,主体,取值,段落ID,原文摘录]。
+判断时必须比较语义而非只比字面，并先核对事实主体、适用对象、条件、阶段和时间范围；对象或条件不同、详略不同、兼容的上下位表述、承诺语气强弱均不是矛盾。类别只是抽取标签，可能误分；必须同时比对跨类别事实，并识别“项目组人数/团队规模”等同义主体，不得因为类别或字面不同漏掉冲突，也不得因为无法确认就猜测冲突。
+只输出 JSON：{"candidates":[{"type":"跨小节矛盾","subject":"冲突事实主体","problem":"为何不能同时成立","suggestion":"建议统一口径；无法确认时说明需主Agent核实","evidence":[{"fact_ref":1},{"fact_ref":2}]}]}。
+evidence 每项只能返回输入中存在的 fact_ref，不要重抄或增加小节、段落、取值、摘录等字段，程序会从原始事实回填；每个候选至少引用来自两个不同小节的事实。无明确矛盾时 candidates 为空数组。只返回 JSON，不输出解释。`;
+}
+
+// Pure request builder used by production and the isolated free-model harness. It performs no
+// file writes and no model call; callers may capture request.messages and invoke
+// request.normalizer/validator against a response without exposing a key to this module.
+function createConsistencySemanticReviewRequest({ sections, ledger, globalFacts, signal }) {
+  const system = semanticReviewSystem();
+  const compactInput = semanticReviewInput(sections, ledger);
+  const facts = compactInput.facts;
+  const sectionByAlias = new Map(compactInput.sections.map(item => [item[0], item[1]]));
+  const factByRef = new Map(facts.map(item => [item[0], item]));
+  const inputJson = JSON.stringify(compactInput);
+  const hash = crypto.createHash('sha256').update(JSON.stringify({
+    version: SEMANTIC_REVIEW_VERSION,
+    system,
+    globalFacts,
+    compactInput,
+  })).digest('hex');
+  const sharedInput = `全局事实设定（用于判断建议口径，不替代证据）：\n${globalFacts}`;
+  const itemInput = `全部类别事实（类别可能误分，须跨类别比对）：\n${inputJson}`;
+  const outputLimit = 8192;
+  const request = {
+    signal,
+    // One original response plus the existing single JSON-repair request is sufficient.
+    // Never resend the complete ledger in an additional outer retry.
+    max_retries: 0,
+    logTitle: '一致性跨节全量比对',
+    progressLabel: '一致性跨节全量比对',
+    failureMessage: '全部跨小节事实比对结果无效',
+    output_token_limit: outputLimit,
+    messages: sharedPrefixMessages(system, sharedInput, itemInput),
+    normalizer: output => ({ candidates: Array.isArray(output?.candidates) ? output.candidates.map(candidate => ({
+      ...candidate,
+      evidence: Array.isArray(candidate?.evidence) ? candidate.evidence.map(evidence => ({
+        fact_ref: Number(evidence?.fact_ref),
+        section_id: sectionByAlias.get(factByRef.get(Number(evidence?.fact_ref))?.[1]) || '',
+        block_id: String(factByRef.get(Number(evidence?.fact_ref))?.[5] || ''),
+        value: String(factByRef.get(Number(evidence?.fact_ref))?.[4] || ''),
+        quote: String(factByRef.get(Number(evidence?.fact_ref))?.[6] || ''),
+        ...(evidence && typeof evidence === 'object' && Object.keys(evidence).some(key => key !== 'fact_ref')
+          ? { invalid_fields: Object.keys(evidence).filter(key => key !== 'fact_ref') } : {}),
+      })) : candidate?.evidence,
+    })) : output?.candidates }),
+    validator(output) {
+      if (!Array.isArray(output.candidates)) throw new Error('candidates 必须为数组');
+      for (const candidate of output.candidates) {
+        if (candidate?.type !== '跨小节矛盾' || !String(candidate.subject || '').trim() || !String(candidate.problem || '').trim()
+          || typeof candidate.suggestion !== 'string' || !Array.isArray(candidate.evidence) || candidate.evidence.length < 2
+          || new Set(candidate.evidence.map(item => item?.section_id)).size < 2) throw new Error('候选须包含主体、问题、建议及至少两个不同小节的证据');
+        for (const evidence of candidate.evidence) {
+          if (!Number.isInteger(evidence?.fact_ref) || !factByRef.has(evidence.fact_ref)) throw new Error('候选证据 fact_ref 必须来自完整事实输入');
+          if (evidence.invalid_fields?.length) throw new Error('候选证据只能包含 fact_ref，不得重抄或增加其他字段');
+        }
+      }
+    },
+  };
+  return {
+    request,
+    hash,
+    factCount: facts.length,
+    sectionCount: new Set(facts.map(fact => fact[1])).size,
+    compactInputCharacters: inputJson.length,
+    estimatedInputTokens: estimateTextTokens(`${system}\n${sharedInput}\n${itemInput}`),
+  };
+}
+
+function createConsistencySemanticReviewRequestFromWorkspace(workspaceDir, signal) {
+  const { sections } = auditScope(workspaceDir);
+  const ledger = readLedger(workspaceDir);
+  const globalFacts = fs.readFileSync(path.join(workspaceDir, '全局事实设定.md'), 'utf8');
+  return createConsistencySemanticReviewRequest({ sections, ledger, globalFacts, signal });
+}
+
+function writeSemanticReviewMarkdown(workspaceDir, sections, review) {
+  const byId = new Map(sections.map(section => [section.id, section]));
+  const lines = [
+    '# 正文一致性语义候选',
+    '程序已把全部类别的完整台账事实一次性交给模型做结构化语义比对，包含跨类别及同义主体核对。主 Agent 应优先处理这里的候选，并用 search-sections 定点核实；无需再用 bash 或 Node 脚本遍历整份台账。原始事实台账仍是证据来源。',
+    '',
+  ];
+  if (review.error) lines.push(`全量结构化语义比对失败：${review.error}。必须回到原始事实台账覆盖全部类别及跨类别关系，不得视为无问题。`, '');
+  else if (!review.candidates?.length) lines.push('未发现明确的跨小节矛盾。', '');
+  else {
+    review.candidates.forEach((candidate, index) => {
+      lines.push(`${index + 1}. ${candidate.subject}：${candidate.problem}；建议：${candidate.suggestion}`);
+      for (const evidence of candidate.evidence) {
+        const section = byId.get(evidence.section_id);
+        lines.push(`   - ${section ? `${section.number} ${section.title}` : evidence.section_id} [${evidence.block_id || '未定位'}]：${evidence.value}${evidence.quote ? `（“${evidence.quote}”）` : ''}`);
+      }
+    });
+    lines.push('');
+  }
+  writeWorkspaceFile(workspaceDir, SEMANTIC_REVIEW_FILE, lines.join('\n'));
+}
+
+// 全部事实一次结构化语义比对，替代主 Agent 反复用 shell 脚本遍历大型台账，且保留
+// 跨类别、同义主体发现能力。缓存同时绑定规则、全局事实和完整事实；失败时回退原台账。
+async function buildConsistencySemanticReview({ aiService, workspaceDir, signal, onActivity }) {
+  const { sections } = auditScope(workspaceDir);
+  const file = path.join(workspaceDir, SEMANTIC_REVIEW_JSON);
+  let stored = null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed?.version === SEMANTIC_REVIEW_VERSION) stored = parsed;
+  } catch {}
+  const prepared = createConsistencySemanticReviewRequestFromWorkspace(workspaceDir, signal);
+  const { request, hash, factCount, sectionCount, estimatedInputTokens } = prepared;
+  let review;
+  if (factCount < 2 || sectionCount < 2) review = { version: SEMANTIC_REVIEW_VERSION, hash, candidates: [] };
+  else if (stored?.hash === hash && Array.isArray(stored.candidates) && !stored.error) review = stored;
+  else {
+    const configuredContext = Number(aiService.getConfig?.()?.context_length_limit || 0);
+    // Reserve output plus a 10% provider/tokenizer safety margin. If the complete ledger does
+    // not fit, do not truncate facts or claim coverage; the main audit reads the raw ledger.
+    const safeInputLimit = configuredContext > 0 ? Math.max(1, Math.floor(configuredContext * 0.9) - request.output_token_limit) : Infinity;
+    if (estimatedInputTokens > safeInputLimit) {
+      review = { version: SEMANTIC_REVIEW_VERSION, hash, candidates: [], error: `完整事实输入预估 ${estimatedInputTokens} tokens，超过当前模型安全输入预算 ${safeInputLimit}；未截断事实，已回退原始台账完整复核。` };
+    } else try {
+      onActivity?.({ progress: { step: 'consistency-semantic-review', label: '正在结构化比对全部跨节事实', unit: '项', total: factCount, completed: 0 } });
+      const result = await aiService.requestJson(request);
+      review = { version: SEMANTIC_REVIEW_VERSION, hash, candidates: result.candidates };
+    } catch (error) {
+      signal?.throwIfAborted?.();
+      review = { version: SEMANTIC_REVIEW_VERSION, hash, candidates: [], error: error?.message || String(error) };
+    }
+  }
+  writeWorkspaceFile(workspaceDir, SEMANTIC_REVIEW_JSON, JSON.stringify(review, null, 2));
+  writeSemanticReviewMarkdown(workspaceDir, sections, review);
+  const candidateCount = review.candidates?.length || 0;
+  const failedScopes = review.error ? ['全部事实'] : [];
+  onActivity?.({ progress: { step: 'consistency-semantic-review', label: failedScopes.length
+    ? '跨节事实结构化比对失败，回退原台账完整复核'
+    : `跨节事实结构化比对完成，发现 ${candidateCount} 个待核实候选`, done: true } });
+  return { review, candidateCount, failedScopes };
 }
 
 // 只有同版台账明确判定通过，且台账审查时的 HTML 哈希仍与当前文件一致，才允许自动流程复用该结论。
@@ -327,13 +538,25 @@ function collectProtectedFactBlockIds(workspaceDir, sections) {
   }));
 }
 
+function naturalnessRepairInstructions(entry) {
+  if (entry?.naturalness?.status !== 'needs_revision' || !entry.naturalness.issues?.length) return '';
+  const issues = entry.naturalness.issues.map(issue => `- [${issue.block_id || '未定位'}] ${issue.type || '表达问题'}：${issue.problem || ''}`).join('\n');
+  return `同时处理的自然文风问题（与本次事实修复合并为同一次编辑，不新增整节重写）：\n${issues}\n${NATURAL_WRITING_STANDARD}\n只调整上述问题所在段落的表达；不得改变任何事实、数值、工期、范围、责任、承诺、表格、图片或图注。`;
+}
+
+// Exported for a narrow contract test: naturalness work is attached only to an existing
+// fact-repair job, never scheduled as an additional request here.
+function combineRepairInstructions(factInstructions, entry) {
+  return [String(factInstructions || '').trim(), naturalnessRepairInstructions(entry)].filter(Boolean).join('\n\n');
+}
+
 // 单轮审计：只处理正文前后矛盾和与全局事实冲突；主 Agent 基于台账比对，统一经 repair-sections 修复。
 function buildConsistencyPrompt(state, { hasKnowledgeBase, workspaceDir }) {
   if (state.status === 'completed') return '一致性审计已经结束。保留现有正文及结果清单，读取正文生成结果.json并标记 task_complete=true；不要重新审计、修复或调整字数。';
   const incremental = auditScope(workspaceDir).references.length > 0;
-  return `现在执行全文一致性审计，一次完成审计和修复，不分轮次。一致性审计只处理两类问题：正文前后矛盾（同一小节内部或不同小节之间），以及正文与全局事实设定冲突。程序已${incremental ? '核对本轮新增小节，并汇总已完成小节的事实作为参考' : '并发核对本轮每个目标小节'}，结果在《${LEDGER_FILE}》：包括小节与全局事实的冲突、小节内部矛盾，以及按类别排列的可核对事实。
-${incremental ? '本轮为新增小节审计：只审计和修改本轮目标小节；台账中标注“参考·只读”的已完成小节不修改，只作为比对依据。新增小节与参考小节不一致时，修改新增小节，使其与参考小节保持一致。\n' : ''}1. 阅读全局事实设定.md和该台账。台账的阅读方式自行决定，可按类别分段读取，但须覆盖其中全部问题和全部类别的事实；不必逐节通读正文。台账列出“核对失败的小节”时，这些小节的问题和事实未列入台账：先调用 recheck-sections 重新核对（失败原因指向本节 HTML 时可先修正再核对）；仍失败时读取原小节文件自行核对问题和事实，提交结论时在 manually_checked_section_ids 中列出。
-2. 复核台账列出的小节问题，剔除因对象、适用条件或阶段不同而产生的差异；再按类别比对各小节事实，找出同一事实取值不同或说法互相排斥的地方，例如数量、日期、期限、频次、时限、地点、金额、技术参数、编号与名称不一致，或同一事项的责任方互相排斥。需要核实原文时，用 search-sections 按关键词定位具体矛盾所在段落，或定点读取原小节文件；不要逐节通读全部正文，不为寻找近义说法反复检索。
+  return `现在执行全文一致性审计，一次完成审计和修复，不分轮次。一致性审计只处理两类问题：正文前后矛盾（同一小节内部或不同小节之间），以及正文与全局事实设定冲突。程序已${incremental ? '核对本轮新增小节，并汇总已完成小节的事实作为参考' : '并发核对本轮每个目标小节'}，精简结果在《${CONSISTENCY_ISSUES_FILE}》；程序另将全部类别事实做了一次结构化语义比对，跨节候选在《${SEMANTIC_REVIEW_FILE}》。
+${incremental ? '本轮为新增小节审计：只审计和修改本轮目标小节；台账中标注“参考·只读”的已完成小节不修改，只作为比对依据。新增小节与参考小节不一致时，修改新增小节，使其与参考小节保持一致。\n' : ''}1. 阅读全局事实设定.md、《${CONSISTENCY_ISSUES_FILE}》和《${SEMANTIC_REVIEW_FILE}》。语义候选来自全部类别事实的一次完整比对，包含跨类别和同义主体；逐项复核候选，剔除对象、条件或阶段不同造成的假冲突。候选文件明确写明全量比对失败时，才回到《${LEDGER_FILE}》完整复核全部类别及跨类别关系。不要再用 bash 或 Node 脚本遍历、切分或统计整份台账。问题清单列出“核对失败小节”时，先调用 recheck-sections 重新核对；仍失败时读取原小节文件自行核对并在提交时列出。
+2. 需要核实候选原文时，用 search-sections 按关键词或小节 ID 定点定位；不要逐节通读全部正文，不为寻找近义说法反复检索。语义候选是精简入口，原始事实台账仍是证据来源，不得忽略候选、失败类别或台账顶层问题。
 3. 统一取值：与全局事实冲突的，以全局事实设定为准；全局事实未规定的，可参考项目概述.md、招标文件关键信息.md${hasKnowledgeBase ? '及知识库' : ''}等材料；没有可确认的材料或材料之间互相冲突时，由你选定一个合理取值。一致性审计的目标是全文一致、正文自身不矛盾，外部材料只作参考，不因缺少依据而保留矛盾。
 4. 以下内容不是问题，不修改：用词、称谓、表述不同或详略不同；全局事实未提及的补充内容（例如岗位、流程、交付物、频次、承诺），只要不与全局事实或其他内容冲突；承诺语气强弱；文风和润色。不追究内容是否有材料依据，不撤回或削弱承诺，只处理会影响阅读理解或项目实施的矛盾。
 5. 确定统一结论后，将需要修改的小节写入 ${taskFilePath('repair')}，格式为 {"rules":"可选，统一修复规则","sections":[{"section_id":"小节 ID","instructions":"本节具体矛盾及统一结论"}]}，再调用 repair-sections 派发；section_id 从台账“小节目录”原样复制${incremental ? '，只能提交本轮目标小节' : ''}。${TASK_FILE_WRITING}同一取值需要在多个小节统一时，写成统一规则放入 rules（写明统一后的取值及适用范围，例如“服务期统一为一年”），并列出涉及的小节，这些小节 instructions 可填空字符串，子任务会在各自小节按规则修改；个别矛盾在该节 instructions 写清段落 ID、矛盾内容及统一结论。子任务按该结论修复，不自行选择另一套取值。需要修改的小节超过 5 个时通过 repair-sections 并发修复；5 个及以下可以直接修改对应小节文件，按同一结论修改。
@@ -430,7 +653,7 @@ function createContentGenerationConsistencyTools({ agentService, aiService, sign
         if (error?.code === AI_UPSTREAM_UNAVAILABLE) failTask(error);
         throw error;
       } finally {
-        writeWorkspaceFile(workspaceDir, LEDGER_FILE, buildLedgerMarkdown(sections, ledger));
+        writeLedgerReports(workspaceDir, sections, ledger);
         protectLedger();
       }
       reportExtraction(onActivity, sections.length, [], { label: '小节事实核对完成', done: true });
@@ -452,6 +675,7 @@ function createContentGenerationConsistencyTools({ agentService, aiService, sign
       const targets = new Map(targetList.map(section => [section.id, section]));
       const referenceIds = new Set(references.map(section => section.id));
       const rules = params.rules?.trim() || '';
+      const ledger = readLedger(workspaceDir);
       activity.editing ||= new Set();
       // 模型输入边界：同节要求合并，ID 错误、参考小节、编辑中和缺少要求的项逐项返回，不拖累同批其他小节。
       const order = [];
@@ -468,7 +692,9 @@ function createContentGenerationConsistencyTools({ agentService, aiService, sign
       for (const [id, parts] of requests) {
         if (activity.editing.has(id)) skipped.set(id, '未执行：该小节正在其他批次中修复，请等待该批结束后再派发。');
         else if (!parts.length && !rules) skipped.set(id, '未执行：instructions 为空且本批未提供 rules，缺少修复要求。');
-        else jobs.push({ section_id: id, instructions: parts.join('\n') || RULE_CHECK_INSTRUCTIONS });
+        else {
+          jobs.push({ section_id: id, instructions: combineRepairInstructions(parts.join('\n') || RULE_CHECK_INSTRUCTIONS, ledger.sections?.[id]) });
+        }
       }
       const ids = jobs.map(job => job.section_id);
       const before = new Map(ids.map(id => [id, read(targets.get(id).file)]));
@@ -526,4 +752,4 @@ function createContentGenerationConsistencyTools({ agentService, aiService, sign
   }];
 }
 
-module.exports = { CONSISTENCY_TOOLS, LEDGER_FILE, LEDGER_JSON, sectionAuditText, extractConsistencyLedger, buildConsistencyPrompt, collectConsistencySubmissionIssues, collectNaturalnessApprovedHashes, collectProtectedFactBlockIds, createContentGenerationConsistencyTools };
+module.exports = { CONSISTENCY_TOOLS, LEDGER_FILE, LEDGER_JSON, CONSISTENCY_ISSUES_FILE, SEMANTIC_REVIEW_FILE, SEMANTIC_REVIEW_JSON, sectionAuditText, extractConsistencyLedger, refreshConsistencyAfterRepairs, createConsistencySemanticReviewRequest, createConsistencySemanticReviewRequestFromWorkspace, buildConsistencySemanticReview, buildConsistencyPrompt, collectConsistencySubmissionIssues, collectNaturalnessApprovedHashes, collectProtectedFactBlockIds, combineRepairInstructions, createContentGenerationConsistencyTools };

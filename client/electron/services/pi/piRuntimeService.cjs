@@ -724,6 +724,14 @@ function createPiRuntimeService({ app, configStore, aiService, isMonitorActive, 
         activeTask.last_activity_at = nowIso();
         notifyAiResponse(parentActivity);
       },
+      getUsageContext() {
+        const base = payload.usage_context && typeof payload.usage_context === 'object' ? payload.usage_context : {};
+        return {
+          ...base,
+          stage: activeTask?.workflow_stage || activeTask?.stage || base.stage || 'starting',
+          source: 'pi-agent',
+        };
+      },
     };
     return runWithAiRequestActivity(aiActivity, () => executeTask(payload, taskToken, aiActivity));
   }

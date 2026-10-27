@@ -352,6 +352,7 @@ async function runFixScenario(finalOcr, { ai = false, multimodal = false, vision
   const checkpoints = [];
   await runBlindCheckFixTask({
     agentService: {}, aiService: { getConfig: () => ({ multimodal_enabled: multimodal }) }, payload: { ai }, taskControl: { signal: new AbortController().signal },
+    pageMeasure: async () => ({ pages: 3, source: 'microsoft-word' }),
     workspaceStore: {
       prepareFixInput: () => input,
       loadBlindCheck: () => ({ result: { status: 'success', inputSignature: input.signature, groups: [imageGroup] }, review: { status: 'skipped' } }),

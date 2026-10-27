@@ -4920,6 +4920,139 @@
   justify-content: center;
 }
 
+.content-task-usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.content-task-usage-metrics > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 8px 9px;
+  background: #f6f8fc;
+  border: 1px solid rgba(214, 222, 234, 0.75);
+  border-radius: 9px;
+}
+
+.content-task-usage-metrics dt {
+  color: var(--yb-text-muted);
+  font-size: 9px;
+}
+
+.content-task-usage-metrics dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--yb-text);
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.content-task-usage-total {
+  color: var(--yb-text-soft) !important;
+}
+
+.content-task-usage-total strong {
+  color: var(--yb-text);
+  font-size: 11px;
+}
+
+.content-task-usage-warning {
+  padding: 8px;
+  color: #7a5310 !important;
+  background: rgba(245, 158, 11, 0.1);
+  border-radius: 9px;
+}
+
+.content-task-usage-stages {
+  min-width: 0;
+  color: var(--yb-text-soft);
+  font-size: 10px;
+}
+
+.content-task-usage-stages > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 0;
+  cursor: pointer;
+  color: var(--yb-text);
+  font-weight: 750;
+  border-top: 1px solid rgba(214, 222, 234, 0.7);
+}
+
+.content-task-usage-stages > summary::marker {
+  color: var(--yb-primary);
+}
+
+.content-task-usage-stages > summary em {
+  color: var(--yb-text-muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.content-task-usage-stages > div {
+  display: grid;
+  max-height: 220px;
+  gap: 6px;
+  padding-right: 2px;
+  overflow: auto;
+}
+
+.content-task-usage-stages section {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 7px 8px;
+  background: #f8faff;
+  border-radius: 8px;
+}
+
+.content-task-usage-stages header {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.content-task-usage-stages header strong {
+  min-width: 0;
+  color: var(--yb-text);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.content-task-usage-stages header span,
+.content-task-usage-stages section small {
+  color: var(--yb-text-muted);
+  font-size: 9px;
+}
+
+.content-task-usage-stages section p {
+  margin: 0;
+  color: var(--yb-text-soft);
+  font-size: 9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.content-task-usage-stages section small {
+  color: #8a5a08;
+  line-height: 1.4;
+}
+
+.content-assistant-card > .content-task-usage-retry {
+  width: max-content;
+  padding: 0;
+  justify-content: flex-start;
+}
+
 .content-assistant-metrics {
   display: grid;
   gap: 5px;

@@ -689,8 +689,20 @@ function createUsageCapturingStream(source, onDone, options = {}) {
   });
 }
 
-function recordAgentAiSuccess({ app, config, runtimeMeta, requestId, requestBody, response, responseData, content, usage, startedAt, stream, attempt, diagnostics }) {
+function recordAgentAiSuccess({ app, aiService, activityContext, config, runtimeMeta, requestId, requestBody, response, responseData, content, usage, startedAt, stream, attempt, diagnostics }) {
   const normalizedUsage = normalizeTokenUsage(usage);
+
+  aiService?.recordModelUsage?.({
+    requestId,
+    context: {
+      ...(activityContext?.ai_request_activity?.getUsageContext?.() || {}),
+      source: 'pi-agent',
+    },
+    status: 'success',
+    usage,
+    provider: config.text_model_provider || '',
+    model: config.model_name || '',
+  });
 
   appendProxyDeveloperLog(app, config, runtimeMeta, {
     request_id: requestId,
@@ -720,8 +732,19 @@ function recordAgentAiSuccess({ app, config, runtimeMeta, requestId, requestBody
   });
 }
 
-function recordAgentAiFailure({ app, config, runtimeMeta, requestId, requestBody, error, response, responseData, usage, startedAt, attempt, diagnostics }) {
+function recordAgentAiFailure({ app, aiService, activityContext, config, runtimeMeta, requestId, requestBody, error, response, responseData, usage, startedAt, attempt, diagnostics }) {
   const errorMessage = safeErrorMessage(error);
+  aiService?.recordModelUsage?.({
+    requestId,
+    context: {
+      ...(activityContext?.ai_request_activity?.getUsageContext?.() || {}),
+      source: 'pi-agent',
+    },
+    status: 'failed',
+    usage,
+    provider: config.text_model_provider || '',
+    model: config.model_name || '',
+  });
   appendProxyDeveloperLog(app, config, runtimeMeta, {
     request_id: requestId,
     type: 'chat-error',
@@ -750,7 +773,7 @@ function recordAgentAiFailure({ app, config, runtimeMeta, requestId, requestBody
   });
 }
 
-async function prepareProxyResponse({ app, config, runtimeMeta, requestId, requestBody, downstreamWantsStream, response, startedAt, attempt, diagnostics, onActivity, activityContext, streamTimeout }) {
+async function prepareProxyResponse({ app, aiService, config, runtimeMeta, requestId, requestBody, downstreamWantsStream, response, startedAt, attempt, diagnostics, onActivity, activityContext, streamTimeout }) {
   const stream = Boolean(requestBody.stream);
 
   if (stream) {
@@ -773,6 +796,8 @@ async function prepareProxyResponse({ app, config, runtimeMeta, requestId, reque
       streamTimeout?.clear?.();
       recordAgentAiFailure({
         app,
+        aiService,
+        activityContext,
         config,
         runtimeMeta,
         requestId,
@@ -809,6 +834,8 @@ async function prepareProxyResponse({ app, config, runtimeMeta, requestId, reque
       streamFinalized = true;
       recordAgentAiSuccess({
         app,
+        aiService,
+        activityContext,
         config,
         runtimeMeta,
         requestId,
@@ -869,6 +896,8 @@ async function prepareProxyResponse({ app, config, runtimeMeta, requestId, reque
   const downstreamBody = downstreamWantsStream ? createPiSseFromNormalCompletion(responseData) : rawText;
   recordAgentAiSuccess({
     app,
+    aiService,
+    activityContext,
     config,
     runtimeMeta,
     requestId,
@@ -1029,6 +1058,7 @@ async function requestAgentChatCompletion({ app, aiService, runtimeMeta, openAiB
 
           const prepared = await prepareProxyResponse({
             app,
+            aiService,
             config,
             runtimeMeta,
             requestId,
@@ -1056,6 +1086,8 @@ async function requestAgentChatCompletion({ app, aiService, runtimeMeta, openAiB
         const requestId = requestContext?.requestId || proxyRequestId;
         recordAgentAiFailure({
           app,
+          aiService,
+          activityContext,
           config,
           runtimeMeta,
           requestId,

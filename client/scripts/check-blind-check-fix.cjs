@@ -17,7 +17,8 @@ const { cell, emfWithText, imagePara, jpegWithExif, numberingLevel, pageNumberTe
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), '暗标修复验证-'));
 const workspace = path.join(userData, 'workspace');
 const sourceDir = path.join(workspace, 'blind-check', 'source');
-const app = { isPackaged: false, getPath: () => userData, getAppPath: () => path.join(__dirname, '..') };
+// 开发客户端正在运行时会锁住默认 Debug helper；验收可通过 YIBIAO_OPENXML_HELPER_DIR 指向隔离构建产物。
+const app = { isPackaged: Boolean(process.env.YIBIAO_OPENXML_HELPER_DIR), getPath: () => userData, getAppPath: () => path.join(__dirname, '..') };
 let service;
 
 function buildDocx(fileName, body, extra = {}) {
@@ -390,7 +391,7 @@ test('隐藏文字来自多层样式叠加时不删：开关可能互相抵消�
 test('手动换行：在换行处拆成段落，段前分页留在第一段、分节符留在最后一段，标题和编号段落不拆', async () => {
   const body = [
     para(['<w:r><w:t>标题上半</w:t><w:br/><w:t>标题下半</w:t></w:r>'], '<w:pStyle w:val="1"/>'),
-    '<w:p><w:r><w:t>程序生成的第一段。\n第二段内容。</w:t></w:r></w:p>',
+    '<w:p><w:pPr><w:spacing w:before="240" w:after="360" w:beforeLines="100" w:afterLines="200" w:beforeAutospacing="1" w:afterAutospacing="1" w:line="360" w:lineRule="exact"/></w:pPr><w:r><w:t>程序生成的第一段。\n第二段内容。\n第三段内容。</w:t></w:r></w:p>',
     para(['<w:r><w:t>第一行</w:t><w:br/><w:t xml:space="preserve">  第二行</w:t></w:r>'], '<w:pageBreakBefore/>'),
     para(['<w:r><w:t>段尾换行。</w:t><w:br/></w:r>']),
     para(['<w:r><w:t>编号第一行</w:t><w:br/><w:t>编号第二行</w:t></w:r>'], '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'),
@@ -404,16 +405,25 @@ test('手动换行：在换行处拆成段落，段前分页留在第一段、�
   assert.ok(details.some((detail) => /换行字符/.test(detail)), `文字里夹带的换行字符单独说明：${JSON.stringify(details)}`);
 
   const { report, outputPath } = await fix(source, { rules: ['text.linebreak'] });
-  assert.equal(report.fixes['text.linebreak'], 4);
+  assert.equal(report.fixes['text.linebreak'], 5);
   assert.deepEqual(remaining(report, ['text.linebreak']), ['text.linebreak:存在手动换行符×2'], '标题和编号段落里的换行留给人工');
   assert.ok(report.notes.some((note) => /2 段的手动换行/.test(note)), JSON.stringify(report.notes));
   const document = xml(outputPath);
   const texts = paragraphTexts(document);
-  for (const text of ['程序生成的第一段。', '第二段内容。', '第一行', '第二行', '段尾换行。', '节末一行', '节末二行']) assert.ok(texts.includes(text), `${text}：${JSON.stringify(texts)}`);
+  for (const text of ['程序生成的第一段。', '第二段内容。', '第三段内容。', '第一行', '第二行', '段尾换行。', '节末一行', '节末二行']) assert.ok(texts.includes(text), `${text}：${JSON.stringify(texts)}`);
   assert.equal(texts.indexOf('段尾换行。') + 1, texts.indexOf('编号第一行编号第二行'), '段尾换行不留空行');
   assert.equal(texts.indexOf('第一行') + 1, texts.indexOf('第二行'), '新段开头的空格去掉');
   assert.equal((document.match(/<w:pageBreakBefore\s*\/>/g) || []).length, 1, '段前分页只留在拆出的第一段');
   const paragraphs = document.match(/<w:p[ >][\s\S]*?<\/w:p>/g);
+  const firstSplit = paragraphs.find((item) => item.includes('程序生成的第一段。'));
+  const middleSplit = paragraphs.find((item) => item.includes('第二段内容。'));
+  const lastSplit = paragraphs.find((item) => item.includes('第三段内容。'));
+  assert.match(firstSplit, /<w:spacing [^>]*w:before="240"[^>]*w:after="0"[^>]*w:beforeLines="100"[^>]*w:afterLines="0"[^>]*w:beforeAutospacing="1"[^>]*w:afterAutospacing="0"[^>]*w:line="360"[^>]*w:lineRule="exact"/,
+    '拆分首段只保留原段前间距，并保留行距');
+  assert.match(middleSplit, /<w:spacing [^>]*w:before="0"[^>]*w:after="0"[^>]*w:beforeLines="0"[^>]*w:afterLines="0"[^>]*w:beforeAutospacing="0"[^>]*w:afterAutospacing="0"[^>]*w:line="360"[^>]*w:lineRule="exact"/,
+    '拆分中间段的段前段后和自动间距全部清零');
+  assert.match(lastSplit, /<w:spacing [^>]*w:before="0"[^>]*w:after="360"[^>]*w:beforeLines="0"[^>]*w:afterLines="200"[^>]*w:beforeAutospacing="0"[^>]*w:afterAutospacing="1"[^>]*w:line="360"[^>]*w:lineRule="exact"/,
+    '拆分末段只保留原段后间距，并保留行距');
   assert.match(paragraphs.find((item) => item.includes('节末二行')), /<w:sectPr>/, '分节符留在最后一段');
   assert.doesNotMatch(paragraphs.find((item) => item.includes('节末一行')), /<w:sectPr>/);
 });

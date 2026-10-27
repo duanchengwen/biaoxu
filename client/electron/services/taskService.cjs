@@ -346,6 +346,17 @@ function createTask(type, payload) {
   };
 }
 
+function getTaskUsageStage(task = {}) {
+  return String(
+    task.stats?.content?.phase
+    || task.stats?.agent?.phase
+    || task.stats?.phase
+    || task.step
+    || task.type
+    || 'unspecified',
+  );
+}
+
 // 依赖待检文档的暗标任务；从招标文件提取预设与待检文档无关，换文档时不取消。
 const BLIND_CHECK_DOCUMENT_TASK_TYPES = ['blind-check-run', 'blind-check-fix'];
 
@@ -356,7 +367,8 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
   const activeTaskControls = new Map();
 
   function emit(task, snapshot) {
-    const event = { task, ...snapshot };
+    const modelUsage = aiService?.getTaskModelUsage?.(task?.task_id) || task?.modelUsage;
+    const event = { task: modelUsage ? { ...task, modelUsage } : task, ...snapshot };
     for (const webContents of subscribers) {
       if (!webContents.isDestroyed()) {
         webContents.send('tasks:event', event);
@@ -805,6 +817,8 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
         logs: partial.logs ? normalizeLogs(partial.logs) : currentTask.logs,
         updated_at: now(),
       };
+      const modelUsage = aiService?.getTaskModelUsage?.(currentTask.task_id);
+      if (modelUsage) currentTask.modelUsage = modelUsage;
       activeTasks.set(type, currentTask);
       return currentTask;
     };
@@ -920,7 +934,13 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
           : definition.stateKey === 'blindCheck'
             ? blindCheckStore
             : duplicateCheckStore;
-    const runnerAiService = aiService?.withQueueScope ? aiService.withQueueScope(queueScopeId, taskControl.signal) : aiService;
+    const usageContextProvider = () => ({
+      taskId: currentTask.task_id,
+      taskType: currentTask.type,
+      stage: getTaskUsageStage(currentTask),
+      source: 'direct',
+    });
+    const runnerAiService = aiService?.withQueueScope ? aiService.withQueueScope(queueScopeId, taskControl.signal, usageContextProvider) : aiService;
     const agentTaskContextProvider = () => createAgentUserTaskContext(type, definition, payload, currentTask);
     const runnerAgentService = agentService.bindTaskContext(
       agentTaskContextProvider,
@@ -928,6 +948,7 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
         queueScopeId,
         signal: taskControl.signal,
         primary_session: startOptions.primarySession === true,
+        usageContextProvider,
       },
     );
     const runnerOrdinaryAgentService = agentService.bindTaskContext(
@@ -935,6 +956,7 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
       {
         queueScopeId,
         signal: taskControl.signal,
+        usageContextProvider,
       },
     );
     runner({ templateStore, aiService: runnerAiService, agentService: runnerAgentService, ordinaryAgentService: runnerOrdinaryAgentService, workspaceStore: runnerWorkspaceStore, knowledgeBaseService, openXmlHelperService, updateTask, checkpointTask, payload, taskControl, previousState }).catch((error) => {
@@ -1901,7 +1923,13 @@ function createTaskService({ templateStore, aiService, agentService, autoConfirm
       return feasibilityReportStore.saveKeyParameters(markdown);
     },
     getActiveTasks() {
-      return Array.from(activeTasks.values());
+      return Array.from(activeTasks.values()).map(task => {
+        const modelUsage = aiService?.getTaskModelUsage?.(task.task_id) || task.modelUsage;
+        return modelUsage ? { ...task, modelUsage } : task;
+      });
+    },
+    getTaskUsage(taskId) {
+      return aiService?.getTaskModelUsage?.(taskId) || null;
     },
   };
 }

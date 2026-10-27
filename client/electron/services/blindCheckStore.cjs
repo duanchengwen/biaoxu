@@ -281,12 +281,12 @@ function createBlindCheckStore({ app, db, taskLogStore, credentialLibraryService
     db.prepare(`
       INSERT INTO blind_check_fix_results (
         id, status, input_signature, fix_rules_json, output_path, source_bytes, output_bytes, fixes_json, notes_json, validation_json,
-        before_summary_json, before_rule_counts_json, after_summary_json, after_stats_json, error, updated_at,
+        before_summary_json, before_rule_counts_json, after_summary_json, after_stats_json, page_budget_json, error, updated_at,
         items_json, new_groups_json, clauses_json, agent_json
       )
       VALUES (
         1, @status, @input_signature, @fix_rules_json, @output_path, @source_bytes, @output_bytes, @fixes_json, @notes_json, @validation_json,
-        @before_summary_json, @before_rule_counts_json, @after_summary_json, @after_stats_json, @error, @updated_at,
+        @before_summary_json, @before_rule_counts_json, @after_summary_json, @after_stats_json, @page_budget_json, @error, @updated_at,
         @items_json, @new_groups_json, @clauses_json, @agent_json
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -303,6 +303,7 @@ function createBlindCheckStore({ app, db, taskLogStore, credentialLibraryService
         before_rule_counts_json = excluded.before_rule_counts_json,
         after_summary_json = excluded.after_summary_json,
         after_stats_json = excluded.after_stats_json,
+        page_budget_json = excluded.page_budget_json,
         error = excluded.error,
         updated_at = excluded.updated_at,
         items_json = excluded.items_json,
@@ -323,6 +324,7 @@ function createBlindCheckStore({ app, db, taskLogStore, credentialLibraryService
       before_rule_counts_json: null,
       after_summary_json: value('afterSummary', 'after_summary_json', jsonOrNull),
       after_stats_json: value('afterStats', 'after_stats_json', jsonOrNull),
+      page_budget_json: value('pageBudget', 'page_budget_json', jsonOrNull),
       error: value('error', 'error', (item) => (item ? String(item) : null)),
       updated_at: result.updatedAt || now(),
       items_json: value('items', 'items_json', jsonOrNull),
@@ -372,6 +374,7 @@ function createBlindCheckStore({ app, db, taskLogStore, credentialLibraryService
       beforeSummary: safeJsonParse(row.before_summary_json, undefined),
       afterSummary: safeJsonParse(row.after_summary_json, undefined),
       afterStats: safeJsonParse(row.after_stats_json, undefined),
+      pageBudget: safeJsonParse(row.page_budget_json, undefined),
       error: row.error || undefined,
       updatedAt: row.updated_at || undefined,
       items,

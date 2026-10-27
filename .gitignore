@@ -14,6 +14,7 @@ config.json
 
 # 本地隔离测试产物（可能含用户文档副本和运行记录，不上传公开仓库）
 /qa/
+/.qa/
 /client/qa/
 /client/.qa-*/
 

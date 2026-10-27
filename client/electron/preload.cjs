@@ -342,6 +342,7 @@ const bridge = {
     pauseFeasibilityContent: () => ipcRenderer.invoke('tasks:pause-feasibility-content'),
     startFeasibilityHumanWriting: (payload) => ipcRenderer.invoke('tasks:start-feasibility-human-writing', payload),
     getActiveTasks: () => ipcRenderer.invoke('tasks:get-active'),
+    getUsage: (taskId) => ipcRenderer.invoke('tasks:get-usage', taskId),
     onTaskEvent: (callback) => {
       ipcRenderer.send('tasks:subscribe');
       const listener = (_event, payload) => callback(payload);

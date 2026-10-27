@@ -7,6 +7,19 @@ function getAiRequestActivity() {
   return activityStorage.getStore() || null;
 }
 
+// 用量归属与响应计时共用同一异步上下文；只返回任务元数据，不携带 Prompt 或业务内容。
+function getAiUsageContext(activity = getAiRequestActivity()) {
+  if (!activity) return null;
+  try {
+    const value = typeof activity.getUsageContext === 'function'
+      ? activity.getUsageContext()
+      : activity.usageContext;
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // 在指定 Agent 上下文中执行，包括显式清除无归属请求的上下文。
 function runWithAiRequestActivity(activity, runner) {
   return activityStorage.run(activity, runner);
@@ -35,6 +48,7 @@ async function withAiResponseActivity(runner) {
 
 module.exports = {
   getAiRequestActivity,
+  getAiUsageContext,
   runWithAiRequestActivity,
   bindAiRequestActivity,
   notifyAiResponse,

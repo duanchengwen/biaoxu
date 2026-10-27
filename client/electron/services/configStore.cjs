@@ -4,7 +4,7 @@ const { getConfigFilePath } = require('../utils/paths.cjs');
 const { createAnalyticsClientId } = require('../utils/machineIdentity.cjs');
 const { defaultExportFormat, normalizeExportFormat } = require('./exportFormatDefaults.cjs');
 
-const textModelProviders = ['official', 'jinlong', 'volcengine', 'deepseek', 'agnes', 'custom'];
+const textModelProviders = ['official', 'jinlong', 'volcengine', 'deepseek', 'agnes', 'glm', 'custom'];
 const imageModelProviders = ['jinlong', 'volcengine', 'google-ai-studio', 'agnes', 'custom', 'comfyui'];
 const aiRequestModes = ['normal', 'stream'];
 const updateChannels = ['github', 'cloudflare', 'atomgit'];
@@ -27,6 +27,7 @@ const textProviderBaseUrls = {
   volcengine: 'https://ark.cn-beijing.volces.com/api/v3',
   deepseek: 'https://api.deepseek.com',
   agnes: 'https://apihub.agnes-ai.com/v1',
+  glm: 'https://open.bigmodel.cn/api/paas/v4',
   custom: '',
 };
 
@@ -92,6 +93,19 @@ const defaultTextModelProfiles = {
     context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT,
     output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT,
     concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT,
+    temperature_enabled: false,
+    temperature: DEFAULT_TEXT_TEMPERATURE,
+    request_mode: 'stream',
+  },
+  glm: {
+    api_key: '',
+    base_url: textProviderBaseUrls.glm,
+    model_name: 'glm-4.7-flash',
+    multimodal_enabled: false,
+    reasoning_effort: '',
+    context_length_limit: 200000,
+    output_token_limit: 128000,
+    concurrency_limit: 1,
     temperature_enabled: false,
     temperature: DEFAULT_TEXT_TEMPERATURE,
     request_mode: 'stream',
@@ -320,17 +334,19 @@ function normalizeComponentsConfig(source) {
 function normalizeTextModelProfile(provider, profile) {
   const defaults = defaultTextModelProfiles[provider];
   const source = profile || {};
+  const glmModel = source.model_name === 'glm-4-flash-250414' ? source.model_name : 'glm-4.7-flash';
+  const glmLegacy = glmModel === 'glm-4-flash-250414';
   const sourceBaseUrl = provider === 'custom'
     ? source.base_url !== undefined ? source.base_url : defaults.base_url
     : defaults.base_url;
   return {
     api_key: source.api_key !== undefined ? source.api_key : defaults.api_key,
     base_url: sourceBaseUrl,
-    model_name: source.model_name !== undefined ? source.model_name : defaults.model_name,
-    multimodal_enabled: normalizeTextMultimodalEnabled(source.multimodal_enabled, defaults.multimodal_enabled),
+    model_name: provider === 'glm' ? glmModel : source.model_name !== undefined ? source.model_name : defaults.model_name,
+    multimodal_enabled: provider === 'glm' ? false : normalizeTextMultimodalEnabled(source.multimodal_enabled, defaults.multimodal_enabled),
     reasoning_effort: normalizeReasoningEffort(source.reasoning_effort, defaults.reasoning_effort),
-    context_length_limit: normalizeTextContextLengthLimit(source.context_length_limit, defaults.context_length_limit),
-    output_token_limit: normalizeTextOutputTokenLimit(source.output_token_limit, defaults.output_token_limit),
+    context_length_limit: Math.min(normalizeTextContextLengthLimit(source.context_length_limit, defaults.context_length_limit), provider === 'glm' ? (glmLegacy ? 128000 : 200000) : Infinity),
+    output_token_limit: Math.min(normalizeTextOutputTokenLimit(source.output_token_limit, defaults.output_token_limit), provider === 'glm' ? (glmLegacy ? 16000 : 128000) : Infinity),
     concurrency_limit: normalizeTextConcurrencyLimit(source.concurrency_limit, defaults.concurrency_limit),
     temperature_enabled: normalizeTextTemperatureEnabled(source.temperature_enabled, defaults.temperature_enabled),
     temperature: normalizeTextTemperature(source.temperature, defaults.temperature),
@@ -473,7 +489,8 @@ function normalizeConfig(config) {
   if (sourceTextProvider) {
     const fallbackProfile = textModelProfiles[textModelProvider]
       || defaultTextModelProfiles[textModelProvider];
-    textModelProfiles[textModelProvider] = textProfileFromFlatConfig(source, fallbackProfile, textModelProvider);
+    textModelProfiles[textModelProvider] = normalizeTextModelProfile(textModelProvider,
+      textProfileFromFlatConfig(source, fallbackProfile, textModelProvider));
   } else if (!retiredOfficialProvider && textModelProvider === 'custom' && !hasTextModelProfileData(textModelProfiles.custom)) {
     textModelProfiles.custom = textProfileFromUnknownProvider(source, rawTextProvider, textModelProfiles.custom);
   }

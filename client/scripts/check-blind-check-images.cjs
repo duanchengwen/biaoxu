@@ -137,7 +137,7 @@ async function checkTaskWiring(userData) {
   const sourcePath = path.join(sourceDir, '彩色.docx');
   zip.writeZip(sourcePath);
 
-  const helper = createOpenXmlHelperService({ app: { isPackaged: false, getPath: () => userData, getAppPath: () => path.join(__dirname, '..') } });
+  const helper = createOpenXmlHelperService({ app: { isPackaged: Boolean(process.env.YIBIAO_OPENXML_HELPER_DIR), getPath: () => userData, getAppPath: () => path.join(__dirname, '..') } });
   const checkpoints = [];
   const logs = [];
   try {
@@ -177,7 +177,7 @@ async function checkFixWiring(userData) {
   const workspace = path.join(userData, 'workspace');
   const sourcePath = path.join(workspace, 'blind-check', 'source', '彩色.docx');
   const output = 'blind-check/fixed/彩色.docx';
-  const helper = createOpenXmlHelperService({ app: { isPackaged: false, getPath: () => userData, getAppPath: () => path.join(__dirname, '..') } });
+  const helper = createOpenXmlHelperService({ app: { isPackaged: Boolean(process.env.YIBIAO_OPENXML_HELPER_DIR), getPath: () => userData, getAppPath: () => path.join(__dirname, '..') } });
   const checkpoints = [];
   try {
     await runBlindCheckFixTask({
@@ -199,6 +199,7 @@ async function checkFixWiring(userData) {
         removeStaleFixedFiles: () => {},
       },
       openXmlHelperService: helper,
+      pageMeasure: async () => ({ pages: 2, source: 'microsoft-word' }),
       updateTask: () => {},
       checkpointTask: (task, { fixResult }) => checkpoints.push({ task, fixResult }),
       taskControl: { signal: new AbortController().signal },

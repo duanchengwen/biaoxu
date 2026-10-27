@@ -10,6 +10,8 @@ import type { FeasibilityProjectInfo, FeasibilityReportState, FeasibilityReportS
 import type { CredentialCertificate, CredentialEmployee, CredentialImageFieldKey, CredentialLibraryImportResult, CredentialLibraryMutationResult, CredentialLibraryProfile, CredentialLibrarySnapshot, CredentialOtherMaterial, CredentialProject, CredentialRecordSavePayload } from '../../features/credential-library/types';
 import type { ExportFormatConfig, ExportTemplateRecord } from './exportFormat';
 import type { TechnicalPlanOutlineData as OutlineData } from './outline';
+import type { TaskModelUsageSummary } from './modelUsage';
+export type { TaskModelUsageCounters, TaskModelUsageStage, TaskModelUsageSummary } from './modelUsage';
 
 /** 配置保存只更新提交字段，文本服务商档案也支持局部更新。 */
 export type ClientConfigPatch = Partial<Omit<ClientConfig, 'text_model_profiles'>> & {
@@ -29,6 +31,7 @@ export interface TaskEventTask {
   updated_at: string;
   error?: string;
   stats?: unknown;
+  modelUsage?: TaskModelUsageSummary;
 }
 
 export interface TaskEvent<TState = unknown, TRejectionCheckState = unknown, TDuplicateCheckState = unknown> {
@@ -880,8 +883,11 @@ export interface YibiaoBridge {
     startDuplicateAnalysis: (payload: unknown) => Promise<unknown>;
     /** aiReview：仅程序检查（false）或程序检查 + AI 复核（true）。 */
     startBlindCheck: (payload: { aiReview: boolean }) => Promise<unknown>;
-    /** ai：仅程序修复（false）或程序修复 + AI 修复（true）。 */
-    startBlindCheckFix: (payload: { ai: boolean }) => Promise<unknown>;
+    /** ai：仅程序修复（false）或程序修复 + AI 修复（true）；pageBudget 只在调用方能证明文件属于该任务时显式传入。 */
+    startBlindCheckFix: (payload: {
+      ai: boolean;
+      pageBudget?: { mode: 'pages'; targetPages?: number; minimumPages?: number; maximumPages?: number };
+    }) => Promise<unknown>;
     startBlindCheckPresetExtraction: (payload: { source: 'technical-plan' | 'file'; filePath?: string }) => Promise<unknown>;
     startFeasibilityAnalysis: (payload?: unknown) => Promise<unknown>;
     startFeasibilityOutline: (payload?: unknown) => Promise<unknown>;
@@ -890,6 +896,8 @@ export interface YibiaoBridge {
     pauseFeasibilityContent: () => Promise<unknown>;
     startFeasibilityHumanWriting: (payload?: unknown) => Promise<unknown>;
     getActiveTasks: () => Promise<TaskEventTask[]>;
+    /** 历史任务没有本地用量记录时返回 null；0 Token 与无记录分开表达。 */
+    getUsage: (taskId: string) => Promise<TaskModelUsageSummary | null>;
     onTaskEvent: <TState = unknown, TRejectionCheckState = unknown, TDuplicateCheckState = unknown>(callback: (event: TaskEvent<TState, TRejectionCheckState, TDuplicateCheckState>) => void) => () => void;
   };
   export: {

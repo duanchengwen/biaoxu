@@ -52,6 +52,52 @@ const guideItems = [
 const MAX_PRESET_NAME_LENGTH = 30;
 // 当前步骤超过这个时长没有新进展时，说明可能是模型或文件解析响应慢，程序仍在等待。
 const SLOW_STEP_MS = 3 * 60 * 1000;
+
+type BlindCheckFixPageBudgetInput = NonNullable<Parameters<typeof window.yibiao.tasks.startBlindCheckFix>[0]['pageBudget']>;
+
+interface FixPageBudgetDraft {
+  targetPages: string;
+  minimumPages: string;
+  maximumPages: string;
+}
+
+const emptyFixPageBudgetDraft: FixPageBudgetDraft = {
+  targetPages: '',
+  minimumPages: '',
+  maximumPages: '',
+};
+
+function parseOptionalPageCount(value: string, label: string) {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (!/^\d+$/.test(normalized)) throw new Error(`${label}须为大于 0 的整数，或留空。`);
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${label}须为大于 0 的整数，或留空。`);
+  return parsed;
+}
+
+function parseFixPageBudget(draft: FixPageBudgetDraft): BlindCheckFixPageBudgetInput | undefined {
+  const targetPages = parseOptionalPageCount(draft.targetPages, '目标页数');
+  const minimumPages = parseOptionalPageCount(draft.minimumPages, '最少页数');
+  const maximumPages = parseOptionalPageCount(draft.maximumPages, '最多页数');
+  if (targetPages === undefined && minimumPages === undefined && maximumPages === undefined) return undefined;
+  if (minimumPages !== undefined && maximumPages !== undefined && minimumPages > maximumPages) {
+    throw new Error('最少页数不能大于最多页数。');
+  }
+  if (targetPages !== undefined && minimumPages !== undefined && targetPages < minimumPages) {
+    throw new Error('目标页数不能小于最少页数。');
+  }
+  if (targetPages !== undefined && maximumPages !== undefined && targetPages > maximumPages) {
+    throw new Error('目标页数不能大于最多页数。');
+  }
+  return {
+    mode: 'pages',
+    ...(targetPages !== undefined ? { targetPages } : {}),
+    ...(minimumPages !== undefined ? { minimumPages } : {}),
+    ...(maximumPages !== undefined ? { maximumPages } : {}),
+  };
+}
+
 function emptyResult(): BlindCheckResultState {
   return { status: 'idle', groups: [] };
 }
@@ -92,6 +138,7 @@ export default function BlindCheckPage() {
   const [fixAiEnabled, setFixAiEnabled] = useState(true);
   const [checkDialogOpen, setCheckDialogOpen] = useState(false);
   const [fixDialogOpen, setFixDialogOpen] = useState(false);
+  const [fixPageBudgetDraft, setFixPageBudgetDraft] = useState<FixPageBudgetDraft>(emptyFixPageBudgetDraft);
   const [credentialWords, setCredentialWords] = useState<BlindCheckCredentialWord[]>([]);
   const [result, setResult] = useState<BlindCheckResultState>(emptyResult);
   const [checkTask, setCheckTask] = useState<BlindCheckTaskState | undefined>();
@@ -332,10 +379,17 @@ export default function BlindCheckPage() {
 
   /** 修复弹窗里选定方式后启动：仅程序修复，或程序修复后续接检查时的 AI 复核会话做 AI 修复。 */
   const startFix = (ai: boolean) => {
+    let pageBudget: BlindCheckFixPageBudgetInput | undefined;
+    try {
+      pageBudget = parseFixPageBudget(fixPageBudgetDraft);
+    } catch (error) {
+      showToast(errorMessage(error, '页数要求填写有误'), 'error');
+      return;
+    }
     setFixDialogOpen(false);
     setFixAiEnabled(ai);
     setStartingFix(true);
-    void window.yibiao.tasks.startBlindCheckFix({ ai })
+    void window.yibiao.tasks.startBlindCheckFix({ ai, ...(pageBudget ? { pageBudget } : {}) })
       .catch((error) => showToast(errorMessage(error, '启动暗标自动修复失败'), 'error'))
       .finally(() => setStartingFix(false));
   };
@@ -985,18 +1039,69 @@ export default function BlindCheckPage() {
         title="选择修复方式"
         actions={<button type="button" className="secondary-action" onClick={() => setFixDialogOpen(false)}>取消</button>}
       >
-        {/* 点选项直接开始修复；不可选的写明原因，可选时上次的选择用描边标出。 */}
-        <OptionCardList
-          aria-label="修复方式"
-          options={[
-            { value: 'program', title: '仅程序修复', description: fixRules.length ? undefined : '还没有勾选修复项', disabled: !fixRules.length, icon: <Pencil1Icon /> },
-            { value: 'ai', title: '程序修复 + AI 修复', description: reviewReady ? undefined : '本次检查没有 AI 复核，需重新检查并选择「程序检查 + AI 复核」', disabled: !reviewReady, icon: <MagicWandIcon /> },
-          ]}
-          highlightedValue={reviewReady && (fixAiEnabled || !fixRules.length) ? 'ai' : 'program'}
-          // 有一项不可选时标出的是唯一可选项，不是上次的选择。
-          highlightLabel={fixRules.length && reviewReady ? '上次选择' : undefined}
-          onSelect={(value) => startFix(value === 'ai')}
-        />
+        <div className="blind-check-fix-dialog-body">
+          <section className="blind-check-fix-page-guard" aria-labelledby="blind-check-fix-page-guard-title">
+            <div>
+              <strong id="blind-check-fix-page-guard-title">默认保护：不超过原文件实测页数</strong>
+              <p>高级页数全部留空时，系统会先实测当前源 DOCX，并以原文件页数作为修复后上限，不套用其他技术标项目的页数设置。</p>
+            </div>
+            <details>
+              <summary>高级：按原标书页数要求设置</summary>
+              <div className="blind-check-fix-page-fields">
+                <label>
+                  <span>目标页数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    placeholder="不设置"
+                    value={fixPageBudgetDraft.targetPages}
+                    onChange={(event) => setFixPageBudgetDraft((current) => ({ ...current, targetPages: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>最少页数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    placeholder="不设置"
+                    value={fixPageBudgetDraft.minimumPages}
+                    onChange={(event) => setFixPageBudgetDraft((current) => ({ ...current, minimumPages: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  <span>最多页数</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    placeholder="不设置"
+                    value={fixPageBudgetDraft.maximumPages}
+                    onChange={(event) => setFixPageBudgetDraft((current) => ({ ...current, maximumPages: event.target.value }))}
+                  />
+                </label>
+              </div>
+              <p className="blind-check-fix-page-help">有最少或最多页数时按范围验收，目标页数仅作规划参考且必须落在范围内；只填目标页数时按精确页数验收。本次设置只用于这次修复。</p>
+            </details>
+          </section>
+
+          {/* 点选项直接开始修复；不可选的写明原因，可选时上次的选择用描边标出。 */}
+          <OptionCardList
+            aria-label="修复方式"
+            options={[
+              { value: 'program', title: '仅程序修复', description: fixRules.length ? undefined : '还没有勾选修复项', disabled: !fixRules.length, icon: <Pencil1Icon /> },
+              { value: 'ai', title: '程序修复 + AI 修复', description: reviewReady ? undefined : '本次检查没有 AI 复核，需重新检查并选择「程序检查 + AI 复核」', disabled: !reviewReady, icon: <MagicWandIcon /> },
+            ]}
+            highlightedValue={reviewReady && (fixAiEnabled || !fixRules.length) ? 'ai' : 'program'}
+            // 有一项不可选时标出的是唯一可选项，不是上次的选择。
+            highlightLabel={fixRules.length && reviewReady ? '上次选择' : undefined}
+            onSelect={(value) => startFix(value === 'ai')}
+          />
+        </div>
       </AppDialog>
 
       <AppDialog

@@ -7,7 +7,7 @@ const { getGeneratedImagesDir } = require('../utils/paths.cjs');
 const { compressGeneratedImage } = require('../utils/imageCompression.cjs');
 const { createDeveloperLogger } = require('../utils/developerLog.cjs');
 const { createAiRequestQueue } = require('../utils/aiRequestQueue.cjs');
-const { bindAiRequestActivity, notifyAiResponse, withAiResponseActivity } = require('../utils/aiRequestActivity.cjs');
+const { bindAiRequestActivity, getAiUsageContext, notifyAiResponse, withAiResponseActivity } = require('../utils/aiRequestActivity.cjs');
 const { fetchWithRedirect } = require('../utils/fetchWithRedirect.cjs');
 const {
   copyAiHttpError,
@@ -142,11 +142,15 @@ function normalizeAnalyticsEndpointHost(baseUrl) {
 }
 
 function extractOpenAIUsage(responseData) {
-  return normalizeTokenUsage(responseData?.usage);
+  // Keep an absent provider usage object distinguishable from an explicit zero-token report.
+  // The persistent task ledger must show historical/unreported usage as unknown rather than
+  // presenting a misleading zero.
+  return responseData?.usage && typeof responseData.usage === 'object' ? responseData.usage : null;
 }
 
 function extractGoogleUsage(responseData) {
-  return normalizeTokenUsage(responseData?.usageMetadata || responseData?.usage_metadata);
+  const usage = responseData?.usageMetadata || responseData?.usage_metadata;
+  return usage && typeof usage === 'object' ? usage : null;
 }
 
 function normalizeRequestTimeoutMs(request) {
@@ -851,7 +855,7 @@ function normalizeJsonPayload(request, parsed) {
   return normalized;
 }
 
-async function repairJsonResponse(app, config, invalidContent, issues, responseFormat, progressCallback, progressLabel, repairMessagesBuilder, logTitle, signal) {
+async function repairJsonResponse(app, config, invalidContent, issues, responseFormat, progressCallback, progressLabel, repairMessagesBuilder, logTitle, signal, usageContext, recordModelUsage) {
   await emitProgress(progressCallback, `${progressLabel}格式校验失败，正在基于当前结果进行修复。`);
   return chatWithConfig(app, config, {
     messages: repairMessagesBuilder
@@ -860,6 +864,8 @@ async function repairJsonResponse(app, config, invalidContent, issues, responseF
     response_format: responseFormat,
     logTitle: logTitle ? `${logTitle}修复` : `${progressLabel}修复`,
     signal,
+    usage_context: usageContext,
+    _record_model_usage: recordModelUsage,
   });
 }
 
@@ -885,6 +891,8 @@ async function parseOrRepairJsonResponseWithConfig(app, config, request, content
         request.repairMessagesBuilder,
         logTitle,
         request.signal,
+        request.usage_context,
+        request._record_model_usage,
       );
       return normalizeJsonPayload(request, parseJsonContent(repairedContent));
     } catch (repairError) {
@@ -917,6 +925,8 @@ async function collectJsonResponseWithConfig(app, config, request) {
       timeout_message: request.timeout_message,
       logTitle,
       signal: request.signal,
+      usage_context: request.usage_context,
+      _record_model_usage: request._record_model_usage,
     });
 
     try {
@@ -938,6 +948,8 @@ async function collectJsonResponseWithConfig(app, config, request) {
           request.repairMessagesBuilder,
           logTitle,
           request.signal,
+          request.usage_context,
+          request._record_model_usage,
         );
         const repairedParsed = parseJsonContent(repairedContent);
         return normalizeJsonPayload(request, repairedParsed);
@@ -957,15 +969,15 @@ async function collectJsonResponseWithConfig(app, config, request) {
   throw new Error(lastError?.message || failureMessage);
 }
 
-// 所有服务商统一使用 max_completion_tokens 设置输出上限，覆盖 Agent SDK 长度参数；请求可单独指定上限。
+// GLM OpenAI 兼容接口使用 max_tokens；其他服务商沿用 max_completion_tokens。请求可单独指定上限。
 function applyOutputTokenLimit(body, config, requestLimit = 0) {
   delete body.max_output_tokens;
   delete body.max_tokens;
+  delete body.max_completion_tokens;
   const limit = requestLimit > 0 ? requestLimit : config.output_token_limit;
   if (limit > 0) {
-    body.max_completion_tokens = limit;
-  } else {
-    delete body.max_completion_tokens;
+    if (config.text_model_provider === 'glm') body.max_tokens = limit;
+    else body.max_completion_tokens = limit;
   }
   return body;
 }
@@ -1482,6 +1494,32 @@ async function chatWithConfig(app, config, request) {
   let errorMessage = '';
   let analyticsTracked = false;
   const timeoutMs = normalizeRequestTimeoutMs(request);
+  let requestAttempt = 0;
+
+  // Count real provider calls rather than one logical wrapper call: retry and the
+  // response-format compatibility fallback can both incur an additional request.
+  const recordModelUsage = (attemptId, status, usage) => {
+    if (typeof request._record_model_usage !== 'function') return;
+    request._record_model_usage({
+      requestId: `${requestId}:${attemptId}`,
+      context: request.usage_context || getAiUsageContext(),
+      status,
+      usage,
+      provider: config.text_model_provider || '',
+      model: config.model_name || '',
+    });
+  };
+  const requestTextAiTracked = async (body, options) => {
+    const attemptId = ++requestAttempt;
+    try {
+      const result = await requestTextAi(app, config, body, options);
+      recordModelUsage(attemptId, 'success', result.usage);
+      return result;
+    } catch (error) {
+      recordModelUsage(attemptId, 'failed', error?.usage || null);
+      throw error;
+    }
+  };
 
   try {
     writeAiLog(app, config, {
@@ -1497,14 +1535,14 @@ async function chatWithConfig(app, config, request) {
     let result = null;
     result = await runWithAiRetry(() => runWithOperationTimeout(async (signal) => {
       try {
-        return await requestTextAi(app, config, requestBody, { signal, requestMode });
+        return await requestTextAiTracked(requestBody, { signal, requestMode });
       } catch (error) {
         if (!preparedRequest.response_format || !error.responseFormatUnsupported) {
           throw error;
         }
 
         requestBody = createChatRequestBody(config, preparedRequest, { omitResponseFormat: true, stream: requestMode === 'stream' });
-        return requestTextAi(app, config, requestBody, { signal, requestMode });
+        return requestTextAiTracked(requestBody, { signal, requestMode });
       }
     }, timeoutMs, request.signal));
 
@@ -2511,7 +2549,7 @@ async function generateImageWithConfig(app, config, request) {
   throw new Error('当前生图服务商暂不支持正文配图');
 }
 
-function createAiService({ app, configStore }) {
+function createAiService({ app, configStore, modelUsageLedger }) {
   const textRequestQueue = createAiRequestQueue({
     defaultLimit: 10,
     getLimit() {
@@ -2529,7 +2567,7 @@ function createAiService({ app, configStore }) {
     return String(request?.queueScopeId || request?.queue_scope_id || '').trim();
   }
 
-  function withQueueScope(request, queueScopeId, signal) {
+  function withQueueScope(request, queueScopeId, signal, usageContextProvider) {
     const normalizedScopeId = String(queueScopeId || '').trim();
     if (!normalizedScopeId || !request || typeof request !== 'object') {
       return request;
@@ -2539,6 +2577,19 @@ function createAiService({ app, configStore }) {
       ...request,
       queueScopeId: getQueueScopeId(request) || normalizedScopeId,
       ...(signal && !request.signal ? { signal } : {}),
+      ...(!request.usage_context && usageContextProvider ? {
+        usage_context: typeof usageContextProvider === 'function' ? usageContextProvider() : usageContextProvider,
+      } : {}),
+    };
+  }
+
+  function withUsageRecorder(request) {
+    if (!request || typeof request !== 'object' || !modelUsageLedger) return request;
+    return {
+      ...request,
+      _record_model_usage: request._record_model_usage || (event => {
+        try { return modelUsageLedger.record(event); } catch { return null; }
+      }),
     };
   }
 
@@ -2560,10 +2611,11 @@ function createAiService({ app, configStore }) {
     },
 
     async chat(request) {
-      return enqueueTextRequest(request, () => {
+      const trackedRequest = withUsageRecorder(request);
+      return enqueueTextRequest(trackedRequest, () => {
         const config = configStore.load();
-        return chatWithConfig(app, config, request);
-      }, { signal: request?.signal });
+        return chatWithConfig(app, config, trackedRequest);
+      }, { signal: trackedRequest?.signal });
     },
 
     async runAgentChatCompletion(request) {
@@ -2578,24 +2630,27 @@ function createAiService({ app, configStore }) {
     },
 
     async requestJson(request) {
-      return enqueueTextRequest(request, () => {
+      const trackedRequest = withUsageRecorder(request);
+      return enqueueTextRequest(trackedRequest, () => {
         const config = configStore.load();
-        return collectJsonResponseWithConfig(app, config, request);
-      }, { signal: request?.signal });
+        return collectJsonResponseWithConfig(app, config, trackedRequest);
+      }, { signal: trackedRequest?.signal });
     },
 
     async collectJsonResponse(request) {
-      return enqueueTextRequest(request, () => {
+      const trackedRequest = withUsageRecorder(request);
+      return enqueueTextRequest(trackedRequest, () => {
         const config = configStore.load();
-        return collectJsonResponseWithConfig(app, config, request);
-      }, { signal: request?.signal });
+        return collectJsonResponseWithConfig(app, config, trackedRequest);
+      }, { signal: trackedRequest?.signal });
     },
 
     async parseJsonResponseContent(request, content) {
-      return enqueueTextRequest(request, () => {
+      const trackedRequest = withUsageRecorder(request);
+      return enqueueTextRequest(trackedRequest, () => {
         const config = configStore.load();
-        return parseOrRepairJsonResponseWithConfig(app, config, request, content);
-      }, { signal: request?.signal });
+        return parseOrRepairJsonResponseWithConfig(app, config, trackedRequest, content);
+      }, { signal: trackedRequest?.signal });
     },
 
     pauseQueueScope(scopeId) {
@@ -2627,26 +2682,34 @@ function createAiService({ app, configStore }) {
       return onTextTokenStatsChanged(listener);
     },
 
-    withQueueScope(scopeId, signal) {
+    recordModelUsage(event) {
+      try { return modelUsageLedger?.record(event) || null; } catch { return null; }
+    },
+
+    getTaskModelUsage(taskId) {
+      return modelUsageLedger?.getTaskSummary(taskId) || null;
+    },
+
+    withQueueScope(scopeId, signal, usageContextProvider) {
       return {
         ...service,
         chat(request) {
-          return service.chat(withQueueScope(request, scopeId, signal));
+          return service.chat(withQueueScope(request, scopeId, signal, usageContextProvider));
         },
         requestJson(request) {
-          return service.requestJson(withQueueScope(request, scopeId, signal));
+          return service.requestJson(withQueueScope(request, scopeId, signal, usageContextProvider));
         },
         collectJsonResponse(request) {
-          return service.collectJsonResponse(withQueueScope(request, scopeId, signal));
+          return service.collectJsonResponse(withQueueScope(request, scopeId, signal, usageContextProvider));
         },
         parseJsonResponseContent(request, content) {
-          return service.parseJsonResponseContent(withQueueScope(request, scopeId, signal), content);
+          return service.parseJsonResponseContent(withQueueScope(request, scopeId, signal, usageContextProvider), content);
         },
         runAgentChatCompletion(request) {
-          return service.runAgentChatCompletion(withQueueScope(request, scopeId, signal));
+          return service.runAgentChatCompletion(withQueueScope(request, scopeId, signal, usageContextProvider));
         },
         generateImage(request) {
-          return service.generateImage(withQueueScope(request, scopeId, signal));
+          return service.generateImage(withQueueScope(request, scopeId, signal, usageContextProvider));
         },
       };
     },

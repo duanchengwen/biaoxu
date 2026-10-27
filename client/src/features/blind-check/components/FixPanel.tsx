@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { MagicWandIcon } from '@radix-ui/react-icons';
 import { AppSwitch, ProgressBar } from '../../../shared/ui';
 import { fixGroups } from '../fixItems';
-import type { BlindCheckFixResultState, BlindCheckTaskState } from '../types';
+import type { BlindCheckFixPageBudget, BlindCheckFixResultState, BlindCheckTaskState } from '../types';
 import { severityLabels } from './FindingGroupList';
 import FixItemList from './FixItemList';
 import { StepHeader, StepTabs, type StepTab } from './StepLayout';
@@ -25,6 +25,41 @@ interface FixPanelProps {
   reviewReady: boolean;
   onToggle: (ruleId: string, enabled: boolean) => void;
   onStart: () => void;
+}
+
+function measuredPagesLabel(pages: number) {
+  return Number.isFinite(pages) && pages > 0 ? `${Math.trunc(pages)} 页` : '未取得';
+}
+
+function PageBudgetResult({ budget }: { budget: BlindCheckFixPageBudget }) {
+  const measurementNotes = [budget.source.warning, budget.source.error, budget.final.warning, budget.final.error]
+    .map((item) => item?.trim())
+    .filter((item, index, items): item is string => Boolean(item) && items.indexOf(item) === index);
+  return (
+    <section className={`blind-check-page-budget-result ${budget.accepted ? 'is-accepted' : 'is-warning'}`} aria-label="修复后页数验收">
+      <div className="blind-check-page-budget-result-head">
+        <span>{budget.origin === 'source' ? '原文件页数保护' : '本次页数要求'}</span>
+        <strong>{budget.accepted ? '页数验收通过' : '页数需要人工处理'}</strong>
+      </div>
+      <dl>
+        <div>
+          <dt>原文件</dt>
+          <dd>{measuredPagesLabel(budget.source.pages)}</dd>
+        </div>
+        <div>
+          <dt>修复后</dt>
+          <dd>{measuredPagesLabel(budget.final.pages)}</dd>
+        </div>
+      </dl>
+      {budget.requirement ? <p>{budget.requirement}</p> : null}
+      {!budget.accepted && budget.reason ? <p className="blind-check-page-budget-reason">{budget.reason}</p> : null}
+      {measurementNotes.length > 0 ? (
+        <ul>
+          {measurementNotes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      ) : null}
+    </section>
+  );
 }
 
 /**
@@ -146,6 +181,7 @@ export default function FixPanel({ fixRules, currentCounts, fixResult, fixTask, 
     }
     return (
       <>
+        {fixResult.pageBudget ? <PageBudgetResult budget={fixResult.pageBudget} /> : null}
         <div className="blind-check-summary-cards">
           {(['high', 'medium', 'low'] as const).map((severity) => (
             <article className={`is-${severity}`} key={severity}>

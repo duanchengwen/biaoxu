@@ -5,6 +5,7 @@ import { trackConfigUsage } from '../../../shared/analytics/analytics';
 import { AppDialog, MarkdownEditor, MarkdownFullscreenViewer, MarkdownRenderer, ProgressBar, useToast } from '../../../shared/ui';
 import { OUTLINE_CONTENT_MODE_LABELS } from '../../../shared/types';
 import type { ClientConfig, OutlineContentMode, TechnicalPlanOutlineData as OutlineData, TechnicalPlanOutlineItem as OutlineItem, OutlineWordControlOptions } from '../../../shared/types';
+import type { TaskModelUsageStage, TaskModelUsageSummary } from '../../../shared/types/modelUsage';
 import { countReadableWords } from '../../../shared/utils/wordCount';
 import type { BackgroundTaskState, ContentGenerationOptions, ContentGenerationRuntimeState, ContentGenerationSectionStatus, ContentGenerationSections } from '../types';
 import ContentWordPreview from '../components/ContentWordPreview';
@@ -47,6 +48,46 @@ interface PageOptimizationDraft {
   targetPages: string;
   minimumPages: string;
   maximumPages: string;
+}
+
+interface TaskUsageLookupState {
+  taskId: string;
+  status: 'loading' | 'loaded' | 'error';
+  usage: TaskModelUsageSummary | null;
+}
+
+const TASK_USAGE_STAGE_LABELS: Record<string, string> = {
+  starting: '任务准备',
+  planning: '正文编排',
+  'content-planning': '正文编排',
+  generating: '正文生成',
+  'word-adjusting': '字数校正',
+  auditing: '事实一致性审校',
+  'table-cleaning': '去表格',
+  naturalizing: '文风审校 / AI 去痕',
+  'page-adjusting': '篇幅优化',
+  'layout-checking': '格式自检',
+  'word-converting': 'Word 转换',
+  'export-repair': '导出修复',
+  unspecified: '未标注阶段',
+};
+
+function formatUsageInteger(value: number) {
+  return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString('zh-CN');
+}
+
+function hasReportedTokenCount(usage: TaskModelUsageSummary | TaskModelUsageStage) {
+  return usage.inputTokens > 0 || usage.outputTokens > 0 || usage.reasoningTokens > 0 || usage.totalTokens > 0;
+}
+
+function formatUsageToken(value: number, usage: TaskModelUsageSummary | TaskModelUsageStage) {
+  return !hasReportedTokenCount(usage) && usage.unknownTokenRequestCount > 0
+    ? '未报告'
+    : formatUsageInteger(value);
+}
+
+function taskUsageStageLabel(stage: string) {
+  return TASK_USAGE_STAGE_LABELS[stage] || stage || TASK_USAGE_STAGE_LABELS.unspecified;
 }
 
 function normalizePageOptimizationDraft(draft: PageOptimizationDraft) {
@@ -261,6 +302,8 @@ function ContentEditPage({
   const [generationSubmitting, setGenerationSubmitting] = useState(false);
   const [naturalizeDialogOpen, setNaturalizeDialogOpen] = useState(false);
   const [pageOptimizeDialogOpen, setPageOptimizeDialogOpen] = useState(false);
+  const [taskUsageLookup, setTaskUsageLookup] = useState<TaskUsageLookupState | null>(null);
+  const [taskUsageRetryKey, setTaskUsageRetryKey] = useState(0);
   const [pageOptimizationDraft, setPageOptimizationDraft] = useState<PageOptimizationDraft>({
     targetPages: String(outlineWordControlSnapshot?.targetPages || 0),
     minimumPages: String(outlineWordControlSnapshot?.minimumPages || 0),
@@ -294,6 +337,10 @@ function ContentEditPage({
   }, [taskInFlight]);
   const taskBlocksGeneration = taskInFlight || paused || sectionSubmitting || generationSubmitting;
   const contentStats = task?.stats?.content;
+  const taskModelUsage = task?.modelUsage
+    || (taskUsageLookup?.taskId === task?.task_id && taskUsageLookup?.status === 'loaded' ? taskUsageLookup.usage : null);
+  const taskUsageLoading = Boolean(task?.task_id && !task?.modelUsage && taskUsageLookup?.taskId === task.task_id && taskUsageLookup?.status === 'loading');
+  const taskUsageError = task?.task_id && !task?.modelUsage && taskUsageLookup?.taskId === task.task_id && taskUsageLookup?.status === 'error';
   const consistencyRemainingIssues = (contentStats?.consistency_remaining_issues || []).filter((issue) => issue.trim());
   const consistencyNeedsReview = consistencyRemainingIssues.length > 0;
   const consistencyCompleted = contentStats?.consistency_status === 'completed';
@@ -301,6 +348,27 @@ function ContentEditPage({
   const previewReadySectionIds = useMemo(() => new Set(contentStats?.preview_ready_section_ids || []), [contentStats?.preview_ready_section_ids]);
   const originalRestoration = hasOriginalPlan && typeof contentStats?.original_restoration?.total_words === 'number' && contentStats.original_restoration.source_hash === originalPlanContentHash
     ? contentStats?.original_restoration : undefined;
+
+  useEffect(() => {
+    const taskId = task?.task_id;
+    if (!taskId || task.modelUsage) {
+      setTaskUsageLookup(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setTaskUsageLookup({ taskId, status: 'loading', usage: null });
+    void window.yibiao.tasks.getUsage(taskId)
+      .then((usage) => {
+        if (!cancelled) setTaskUsageLookup({ taskId, status: 'loaded', usage });
+      })
+      .catch(() => {
+        if (!cancelled) setTaskUsageLookup({ taskId, status: 'error', usage: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task?.task_id, task?.modelUsage, taskUsageRetryKey]);
   const developerStageGate = developerMode && paused ? contentStats?.developer_stage_gate : undefined;
   const progressDetail = task?.progress_detail || contentStats?.output_progress;
   const planning = phaseVisible && contentStats?.phase === 'planning';
@@ -1139,6 +1207,74 @@ function ContentEditPage({
             <strong>篇幅与审校</strong>
             <p>只显示当前工作区的真实生成与实排结果。</p>
           </div>
+
+          <section className="content-assistant-card content-task-usage" aria-label="本次任务 Token 用量">
+            <div className="content-assistant-card-head">
+              <span>本次任务 Token 用量</span>
+              <em className={taskModelUsage ? taskModelUsage.unknownTokenRequestCount > 0 ? 'is-warning' : 'is-success' : ''}>
+                {taskModelUsage
+                  ? `${formatUsageInteger(taskModelUsage.requestCount)} 次请求`
+                  : taskUsageLoading ? '读取中' : taskUsageError ? '读取失败' : task ? '未报告' : '等待任务'}
+              </em>
+            </div>
+            {taskModelUsage ? (
+              <>
+                <dl className="content-task-usage-metrics">
+                  <div><dt>输入 Token</dt><dd>{formatUsageToken(taskModelUsage.inputTokens, taskModelUsage)}</dd></div>
+                  <div><dt>输出 Token</dt><dd>{formatUsageToken(taskModelUsage.outputTokens, taskModelUsage)}</dd></div>
+                  <div><dt>缓存输入</dt><dd>{formatUsageToken(taskModelUsage.cachedInputTokens, taskModelUsage)}</dd></div>
+                  <div><dt>请求数</dt><dd>{formatUsageInteger(taskModelUsage.requestCount)}</dd></div>
+                </dl>
+                <p className="content-task-usage-total">
+                  已报告合计 <strong>{formatUsageToken(taskModelUsage.totalTokens, taskModelUsage)}</strong> Token
+                  {taskModelUsage.reasoningTokens > 0 ? `，其中推理 ${formatUsageInteger(taskModelUsage.reasoningTokens)}` : ''}
+                </p>
+                {taskModelUsage.unknownTokenRequestCount > 0 && (
+                  <p className="content-task-usage-warning">
+                    {formatUsageInteger(taskModelUsage.unknownTokenRequestCount)} 次请求未返回 Token 用量；当前数字仅汇总服务商已报告部分，不代表未报告请求免费。
+                  </p>
+                )}
+                {taskModelUsage.failedRequestCount > 0 && (
+                  <small>{formatUsageInteger(taskModelUsage.failedRequestCount)} 次请求失败，已计入请求数。</small>
+                )}
+                {taskModelUsage.stages.length > 0 && (
+                  <details className="content-task-usage-stages">
+                    <summary><span>按阶段查看</span><em>{taskModelUsage.stages.length} 个阶段</em></summary>
+                    <div>
+                      {taskModelUsage.stages.map((stage, index) => (
+                        <section key={`${stage.stage}-${index}`}>
+                          <header>
+                            <strong title={stage.stage}>{taskUsageStageLabel(stage.stage)}</strong>
+                            <span>{formatUsageInteger(stage.requestCount)} 次</span>
+                          </header>
+                          <p>输入 {formatUsageToken(stage.inputTokens, stage)} · 输出 {formatUsageToken(stage.outputTokens, stage)} · 缓存 {formatUsageToken(stage.cachedInputTokens, stage)}</p>
+                          {(stage.unknownTokenRequestCount > 0 || stage.failedRequestCount > 0) && (
+                            <small>
+                              {stage.unknownTokenRequestCount > 0 ? `${formatUsageInteger(stage.unknownTokenRequestCount)} 次未报告用量` : ''}
+                              {stage.unknownTokenRequestCount > 0 && stage.failedRequestCount > 0 ? '；' : ''}
+                              {stage.failedRequestCount > 0 ? `${formatUsageInteger(stage.failedRequestCount)} 次失败` : ''}
+                            </small>
+                          )}
+                        </section>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                <small>缓存输入已包含在输入 Token 中；Token 是模型服务报告的用量，不直接等于人民币费用。</small>
+              </>
+            ) : taskUsageLoading ? (
+              <p role="status">正在读取本次任务的模型用量…</p>
+            ) : taskUsageError ? (
+              <>
+                <p>暂时无法读取本次任务的 Token 用量。</p>
+                <button type="button" className="text-button content-task-usage-retry" onClick={() => setTaskUsageRetryKey((value) => value + 1)}>重新读取</button>
+              </>
+            ) : task ? (
+              <p>未报告。当前任务没有可追溯的 Token 记录；历史版本未保存的数据无法补算，也不代表本次调用免费。</p>
+            ) : (
+              <p>正文任务开始后，这里会显示本次任务由模型服务报告的用量。</p>
+            )}
+          </section>
 
           <section className="content-assistant-card is-page-count">
             <div className="content-assistant-card-head">

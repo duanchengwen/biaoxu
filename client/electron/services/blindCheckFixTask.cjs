@@ -6,11 +6,126 @@ const { FIX_RULE_IDS } = require('./blindCheckPresets.cjs');
 const { buildFixItems, buildIssueList, fixScope, issueSummary, newProblemGroups, pendingSummary, reviewForResult } = require('./blindCheckReview.cjs');
 const { mapReport } = require('./blindCheckTask.cjs');
 const { collectImageTextFacts, collectModelImageTextFacts, redactImageTextInCopy, appendImageTextReport, verifyImageRedactions, verifyRedactionsWithVision } = require('./blindCheckImageText.cjs');
+const { measureDocumentPages } = require('./contentGenerationPages.cjs');
+const { isPageCountAccepted, resolvePageConstraint } = require('../shared/pageBudget.mjs');
 
 const FIXABLE_RULES = new Set(FIX_RULE_IDS);
 
 function now() {
   return new Date().toISOString();
+}
+
+function normalizeFixPageBudget(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const constraint = resolvePageConstraint({
+    mode: value.mode === 'words' ? 'words' : 'pages',
+    targetPages: value.targetPages ?? value.target_pages,
+    minimumPages: value.minimumPages ?? value.minimum_pages,
+    maximumPages: value.maximumPages ?? value.maximum_pages,
+  });
+  return constraint.enabled ? constraint : null;
+}
+
+async function safeMeasurePages(file, signal, pageMeasure) {
+  try {
+    const measured = await pageMeasure(file, signal);
+    const pages = Number(measured?.pages || 0);
+    if (!Number.isInteger(pages) || pages <= 0) throw new Error('未返回有效页数');
+    return {
+      pages,
+      source: String(measured?.source || 'unknown'),
+      warning: String(measured?.warning || ''),
+      error: '',
+    };
+  } catch (error) {
+    signal?.throwIfAborted?.();
+    return { pages: 0, source: 'unavailable', warning: '', error: error?.message || '无法实测页数' };
+  }
+}
+
+function buildFixPageGuard(explicitConstraint, sourceMeasurement) {
+  if (explicitConstraint) return { origin: 'explicit', constraint: explicitConstraint };
+  if (sourceMeasurement.pages > 0) {
+    return {
+      origin: 'source',
+      constraint: {
+        enabled: true,
+        kind: 'range',
+        targetPages: sourceMeasurement.pages,
+        minimumPages: 0,
+        maximumPages: sourceMeasurement.pages,
+        planningPages: sourceMeasurement.pages,
+      },
+    };
+  }
+  return { origin: 'source', constraint: { enabled: false, kind: 'none', targetPages: 0, minimumPages: 0, maximumPages: 0, planningPages: 0 } };
+}
+
+function exceedsFixPageUpperBound(pages, guard) {
+  if (!guard?.constraint?.enabled || !(pages > 0)) return false;
+  if (guard.constraint.kind === 'exact') return pages > guard.constraint.targetPages;
+  return guard.constraint.maximumPages > 0 && pages > guard.constraint.maximumPages;
+}
+
+function pageRequirementText(guard) {
+  const constraint = guard.constraint;
+  if (guard.origin === 'source') return `不得超过原文 ${constraint.maximumPages} 页`;
+  if (constraint.kind === 'exact') return `目标 ${constraint.targetPages} 页`;
+  if (constraint.minimumPages > 0 && constraint.maximumPages > 0) return `${constraint.minimumPages}–${constraint.maximumPages} 页`;
+  if (constraint.minimumPages > 0) return `不少于 ${constraint.minimumPages} 页`;
+  return `不超过 ${constraint.maximumPages} 页`;
+}
+
+function assessFixPageBudget({ guard, sourceMeasurement, finalMeasurement, lineBreakFallback }) {
+  const requirement = guard.constraint.enabled ? pageRequirementText(guard) : '与原文页数保持一致';
+  let accepted = false;
+  let reason = '';
+  if (!guard.constraint.enabled) {
+    reason = `原文页数无法实测，不能建立默认“不增页”预算：${sourceMeasurement.error || '原因未知'}`;
+  } else if (finalMeasurement.error) {
+    reason = `修复副本无法实测页数：${finalMeasurement.error}`;
+  } else if (finalMeasurement.source !== 'microsoft-word') {
+    reason = `修复副本仅由${finalMeasurement.source === 'docx-editor' ? '内置编辑器' : finalMeasurement.source}完成分页，尚未经过 Microsoft Word 实测`;
+  } else if (guard.origin === 'source' && sourceMeasurement.source !== 'microsoft-word') {
+    reason = '原文未经过 Microsoft Word 实测，无法可靠确认修复副本没有增页';
+  } else {
+    accepted = isPageCountAccepted(finalMeasurement.pages, guard.constraint);
+    if (!accepted) reason = `${requirement}，修复副本经 Microsoft Word 实测为 ${finalMeasurement.pages} 页`;
+  }
+  return {
+    origin: guard.origin,
+    requirement,
+    constraint: guard.constraint,
+    source: sourceMeasurement,
+    final: finalMeasurement,
+    accepted,
+    lineBreakFallback: lineBreakFallback || null,
+    reason,
+  };
+}
+
+function pageBudgetFinding(status) {
+  if (status.accepted) return null;
+  const sourceText = status.source.pages > 0 ? `原文 ${status.source.pages} 页` : '原文页数未知';
+  const finalText = status.final.pages > 0 ? `修复副本 ${status.final.pages} 页` : '修复副本页数未知';
+  return {
+    id: 'page-delivery-budget',
+    ruleId: 'page.delivery_budget',
+    ruleTitle: '最终交付页数预算',
+    category: 'page',
+    severity: 'medium',
+    message: '最终交付页数未通过实测预算',
+    candidate: false,
+    count: 1,
+    samples: [{
+      where: '全文',
+      text: `${sourceText}，${finalText}；要求${status.requirement}`,
+      detail: status.reason,
+      origin: '',
+      hint: '请在 Microsoft Word 中复核分页，并只精简非关键冗余内容；不得恢复已脱敏信息，也不得用缩小字号或页边距规避页数要求',
+    }],
+    items: [],
+  };
 }
 
 function mapFixReport(report) {
@@ -52,7 +167,8 @@ function reviewForFix(state, input, agentService, ai) {
  * 助手在工作区写出副本、校验并复查，原文件不改动；选了 AI 修复时续接复核会话处理程序修不了的问题，
  * 最后只对修复范围逐条对账。进度只推送不落库，完成时一次提交。
  */
-async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, openXmlHelperService, updateTask, checkpointTask, payload, taskControl }) {
+async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, openXmlHelperService, updateTask, checkpointTask, payload, taskControl,
+  pageMeasure = measureDocumentPages }) {
   const input = workspaceStore.prepareFixInput();
   if (!input.source || !input.signature) throw new Error('请先选择要检查的投标文件');
   const state = workspaceStore.loadBlindCheck();
@@ -63,6 +179,9 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
   if (state.review?.status === 'running') throw new Error('AI 复核还在进行，请等复核完成后再修复');
   // 启动前用户在弹窗里选择仅程序修复或程序修复 + AI 修复，记下来作为下次的默认选项。
   const ai = payload?.ai === true;
+  // 只有调用方显式传入 pageBudget 时才继承技术标页数要求，避免把当前项目预算套到任意上传文件。
+  // 未传时在任务内实测所选源文件，以“修复副本不得比原文增页”作为保守默认值。
+  const explicitPageBudget = normalizeFixPageBudget(payload?.pageBudget);
   const modelFirst = ai && aiService.getConfig?.().multimodal_enabled === true;
   workspaceStore.setFixAiEnabled(ai);
   // 问题清单按检查结论（复核后的结果），与本次是否选 AI 修复无关；续用复核会话只在选了 AI 修复且会话还在时。
@@ -91,6 +210,14 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
   const graySource = input.output.replace(/\.docx$/i, '.gray.docx');
   const grayPath = input.outputPath.replace(/\.docx$/i, '.gray.docx');
   try {
+    updateTask({ status: 'running', progress: 1, logs: [...logs, '正在实测原文页数，建立最终交付页数预算'] });
+    const sourcePageMeasurement = await safeMeasurePages(input.sourcePath, taskControl.signal, pageMeasure);
+    const pageGuard = buildFixPageGuard(explicitPageBudget, sourcePageMeasurement);
+    if (pageGuard.constraint.enabled) {
+      logs.push(`页数预算：${pageRequirementText(pageGuard)}${pageGuard.origin === 'source' ? '（未显式指定预算，默认不增页）' : '（调用方显式指定）'}。`);
+    } else {
+      logs.push(`原文页数无法实测：${sourcePageMeasurement.error}；最终结果将保留页数待人工复核项。`);
+    }
     // 复查时彩色图片规则需要 Main 的像素抽样结论，与检查任务一致；转过灰度的图片按非彩色复查。
     let imageFacts = input.profile.image.check_color ? await collectImageColorFacts(input.sourcePath, { signal: taskControl.signal }) : [];
     const colorParts = input.fixRules.includes('image.color') ? imageFacts.filter((fact) => fact.color).map((fact) => fact.part) : [];
@@ -102,34 +229,50 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
     }
     // 没有勾选任何修复项时跳过程序修复，直接从原文件复制一份副本交给 AI 处理和对账。
     let mapped;
+    let lineBreakFallback = null;
     const helperFixRules = input.fixRules.filter((rule) => rule !== 'image.text_sensitive');
-    if (helperFixRules.length) {
-      const report = await openXmlHelperService.runBlindCheckFix({
-        source: grayParts.length ? graySource : input.source,
-        output: input.output,
-        profile: input.profile,
-        sensitive_words: input.sensitiveWords,
-        image_facts: imageFacts,
-        fix_rules: helperFixRules,
-      }, {
-        signal: taskControl.signal,
-        onProgress: ({ frac, label }) => {
-          updateTask({ status: 'running', progress: Math.max(1, Math.min(60, Math.round(frac * 60))), logs: [...logs, label] });
-        },
-      });
-      mapped = mapFixReport(report);
-    } else {
+    const runProgramFix = async (rules) => {
+      if (rules.length) {
+        const report = await openXmlHelperService.runBlindCheckFix({
+          source: grayParts.length ? graySource : input.source,
+          output: input.output,
+          profile: input.profile,
+          sensitive_words: input.sensitiveWords,
+          image_facts: imageFacts,
+          fix_rules: rules,
+        }, {
+          signal: taskControl.signal,
+          onProgress: ({ frac, label }) => {
+            updateTask({ status: 'running', progress: Math.max(1, Math.min(60, Math.round(frac * 60))), logs: [...logs, label] });
+          },
+        });
+        return mapFixReport(report);
+      }
       // 副本目录平时由助手写出副本时创建，首次使用或重置后还不存在。
       fs.mkdirSync(path.dirname(input.outputPath), { recursive: true });
-      fs.copyFileSync(input.sourcePath, input.outputPath);
+      fs.copyFileSync(grayParts.length ? grayPath : input.sourcePath, input.outputPath);
       const after = mapReport(await openXmlHelperService.runBlindCheck({
         source: input.output, profile: input.profile, sensitive_words: input.sensitiveWords, image_facts: imageFacts,
       }, { signal: taskControl.signal }));
-      mapped = {
+      return {
         sourceBytes: fs.statSync(input.sourcePath).size, outputBytes: fs.statSync(input.outputPath).size, fixes: {}, notes: [], headingFallback: true,
         validation: { checked: false, skippedReason: '没有勾选程序修复项', originalErrors: 0, fixedErrors: 0 },
         afterSummary: after.summary, afterStats: after.stats, groups: after.groups,
       };
+    };
+    mapped = await runProgramFix(helperFixRules);
+    // 大量软换行拆段是历史页数膨胀的主要来源。若它使修复副本超过上限，从同一原件重做一次并保留
+    // text.linebreak 为待人工项；不能为追页数去缩字体、改页边距，或把其他脱敏修复撤回。
+    if (helperFixRules.includes('text.linebreak') && Number(mapped.fixes['text.linebreak'] || 0) > 0 && pageGuard.constraint.enabled) {
+      const firstMeasurement = await safeMeasurePages(input.outputPath, taskControl.signal, pageMeasure);
+      if (exceedsFixPageUpperBound(firstMeasurement.pages, pageGuard)) {
+        const skipped = Number(mapped.fixes['text.linebreak'] || 0);
+        const withoutLineBreaks = helperFixRules.filter((rule) => rule !== 'text.linebreak');
+        logs.push(`手动换行拆段后实测 ${firstMeasurement.pages} 页，超过${pageRequirementText(pageGuard)}；已从原件重做并保留 ${skipped} 处手动换行待人工处理。`);
+        mapped = await runProgramFix(withoutLineBreaks);
+        mapped.notes = [...mapped.notes, `为保持最终页数预算，未自动拆分 ${skipped} 处手动换行；这些问题仍列为待人工处理。`];
+        lineBreakFallback = { skipped, measuredPages: firstMeasurement.pages, measurementSource: firstMeasurement.source };
+      }
     }
     if (grayParts.length) {
       mapped.fixes = { ...mapped.fixes, 'image.color': grayParts.length };
@@ -247,6 +390,22 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
         : `最终本地图片文字复检：${final.stats.imageOcrChecked}/${final.stats.imageOcrTotal} 张，未核验 ${final.stats.imageOcrUnknown} 张（待人工确认）。`);
     }
 
+    updateTask({ status: 'running', progress: 96, logs: [...logs, '正在使用 Microsoft Word 实测最终修复副本页数'] });
+    const finalPageMeasurement = await safeMeasurePages(input.outputPath, taskControl.signal, pageMeasure);
+    const pageBudget = assessFixPageBudget({
+      guard: pageGuard,
+      sourceMeasurement: sourcePageMeasurement,
+      finalMeasurement: finalPageMeasurement,
+      lineBreakFallback,
+    });
+    const pageFinding = pageBudgetFinding(pageBudget);
+    if (pageFinding) {
+      finalGroups = [...finalGroups, pageFinding];
+      logs.push(`页数预算待人工处理：${pageBudget.reason}。`);
+    } else {
+      logs.push(`最终页数验收通过：${pageBudget.requirement}，Microsoft Word 实测 ${finalPageMeasurement.pages} 页。`);
+    }
+
     // 选了 AI 修复却没能完成（失败或会话失效）时，原本交给 AI 的问题在待人工的原因里写明。
     const unavailable = ai ? (agent.status === 'error' ? agent.error : agent.status === 'skipped' ? agent.reason : '') : '';
     const items = buildFixItems({
@@ -279,6 +438,7 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
           groups: finalGroups,
           items,
           agent,
+          pageBudget,
           outputBytes: fs.statSync(input.outputPath).size,
           outputPath: input.outputPath,
           status: 'success',
@@ -300,5 +460,10 @@ async function runBlindCheckFixTask({ agentService, aiService, workspaceStore, o
 }
 
 module.exports = {
+  assessFixPageBudget,
+  buildFixPageGuard,
+  exceedsFixPageUpperBound,
+  normalizeFixPageBudget,
+  pageBudgetFinding,
   runBlindCheckFixTask,
 };

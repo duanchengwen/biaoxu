@@ -406,6 +406,32 @@ export interface BlindCheckFixValidation {
   fixedErrors: number;
 }
 
+export interface BlindCheckFixPageMeasurement {
+  pages: number;
+  source: string;
+  warning: string;
+  error: string;
+}
+
+/** 最终修复副本的页数保护；未显式传任务预算时默认以当前源文件的 Word 实测页数为上限。 */
+export interface BlindCheckFixPageBudget {
+  origin: 'explicit' | 'source';
+  requirement: string;
+  constraint: {
+    enabled: boolean;
+    kind: 'none' | 'exact' | 'range';
+    targetPages: number;
+    minimumPages: number;
+    maximumPages: number;
+    planningPages: number;
+  };
+  source: BlindCheckFixPageMeasurement;
+  final: BlindCheckFixPageMeasurement;
+  accepted: boolean;
+  reason: string;
+  lineBreakFallback?: { skipped: number; measuredPages: number; measurementSource: string } | null;
+}
+
 /** 自动修复结果：修复副本在工作区，原文件不改动；groups 是复查后剩余的问题。 */
 export interface BlindCheckFixResultState {
   status: BlindCheckResultStatus;
@@ -417,6 +443,8 @@ export interface BlindCheckFixResultState {
   fixes?: Record<string, number>;
   notes?: string[];
   validation?: BlindCheckFixValidation;
+  /** 最终页数预算及真实分页验收结果；accepted=false 时 items 中同时保留人工待处理项。 */
+  pageBudget?: BlindCheckFixPageBudget;
   /** 修复范围的处数。 */
   beforeSummary?: BlindCheckSummary | null;
   /** 待人工处理的处数（含修复后新出现的）。 */

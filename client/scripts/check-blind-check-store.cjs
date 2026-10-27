@@ -18,7 +18,7 @@ const { FIX_RULE_IDS } = require('../electron/services/blindCheckPresets.cjs');
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), '暗标检查存储验证-'));
 const inputDir = fs.mkdtempSync(path.join(os.tmpdir(), '暗标检查原件-'));
-const app = { isPackaged: false, getPath: () => userData, getAppPath: () => path.join(__dirname, '..'), once: () => {} };
+const app = { isPackaged: Boolean(process.env.YIBIAO_OPENXML_HELPER_DIR), getPath: () => userData, getAppPath: () => path.join(__dirname, '..'), once: () => {} };
 const credentialLibraryService = { load: () => ({ profile: { companyName: '北京华夏建设有限公司', phone: '13812345678', email: '' } }) };
 const technicalPlanStore = {
   readTenderMarkdown: () => '附表七：技术暗标编制要求。正文四号宋体。',
@@ -54,17 +54,17 @@ after(async () => {
   fs.rmSync(inputDir, { recursive: true, force: true });
 });
 
-test('迁移到 v44，篇幅双模式与暗标检查、修复、AI 复核表齐全且初始状态正确', () => {
-  assert.equal(Number(database.db.pragma('user_version', { simple: true })), 44);
+test('迁移到 v45，篇幅双模式与暗标检查、修复、AI 复核及页数验收表齐全且初始状态正确', () => {
+  assert.equal(Number(database.db.pragma('user_version', { simple: true })), 45);
   // 客户端声明的版本要等于最新迁移，否则已是上一版本的数据库启动时不会执行新迁移。
-  assert.equal(database.schemaVersion, 44);
+  assert.equal(database.schemaVersion, 45);
   const columns = (table) => database.db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name);
   assert.ok(['word_control_mode', 'target_pages', 'minimum_pages', 'maximum_pages', 'naturalize_writing']
     .every((name) => columns('technical_plan_generation_config').includes(name)));
   assert.ok(columns('blind_check_presets').includes('source_json'));
   assert.ok(['ai_review_enabled', 'fix_ai_enabled'].every((name) => columns('blind_check_meta').includes(name)));
   assert.ok(['candidate', 'items_json'].every((name) => columns('blind_check_finding_groups').includes(name)));
-  assert.ok(['items_json', 'new_groups_json', 'clauses_json', 'agent_json'].every((name) => columns('blind_check_fix_results').includes(name)));
+  assert.ok(['items_json', 'new_groups_json', 'clauses_json', 'agent_json', 'page_budget_json'].every((name) => columns('blind_check_fix_results').includes(name)));
   const tables = database.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'blind_check_%'").all().map((row) => row.name).sort();
   assert.deepEqual(tables, ['blind_check_finding_groups', 'blind_check_fix_groups', 'blind_check_fix_results', 'blind_check_meta', 'blind_check_presets', 'blind_check_results', 'blind_check_reviews', 'blind_check_tasks']);
   const state = store.loadBlindCheck();
@@ -208,6 +208,7 @@ test('自动修复：修复项规范后保存，修复副本与结果落库，�
     updateTask: () => undefined,
     checkpointTask,
     payload: { ai: false },
+    pageMeasure: async () => ({ pages: 3, source: 'microsoft-word' }),
     taskControl: { signal: new AbortController().signal },
   });
   assert.deepEqual(tasks.map((task) => task.status), ['running', 'success'], tasks.at(-1)?.error);
@@ -215,6 +216,8 @@ test('自动修复：修复项规范后保存，修复副本与结果落库，�
   const state = store.loadBlindCheck();
   assert.equal(state.fixTask.status, 'success');
   assert.equal(state.fixResult.status, 'success');
+  assert.equal(state.fixResult.pageBudget?.accepted, true, '最终页数验收结果随修复结果落库并可重新读取');
+  assert.deepEqual([state.fixResult.pageBudget?.source.pages, state.fixResult.pageBudget?.final.pages], [3, 3]);
   assert.equal(state.fixResult.inputSignature, store.getInputSignature());
   assert.deepEqual(state.fixResult.fixRules, ['struct.doc_props', 'font.size', 'text.spaces']);
   assert.ok(state.fixResult.outputPath && fs.existsSync(state.fixResult.outputPath));
@@ -227,6 +230,22 @@ test('自动修复：修复项规范后保存，修复副本与结果落库，�
   assert.equal(store.getFixedDocument()?.path, state.fixResult.outputPath);
   assert.equal(state.fixAiEnabled, false, '记住本次修复方式');
   assert.equal(state.fixResult.agent.reason, '本次选择仅程序修复');
+
+  await runBlindCheckFixTask({
+    workspaceStore: store,
+    openXmlHelperService: helper,
+    updateTask: () => undefined,
+    checkpointTask,
+    payload: { ai: false, pageBudget: { mode: 'pages', maximumPages: 2 } },
+    pageMeasure: async () => ({ pages: 3, source: 'microsoft-word' }),
+    taskControl: { signal: new AbortController().signal },
+  });
+  const exceeded = store.loadBlindCheck().fixResult;
+  assert.equal(exceeded.pageBudget?.accepted, false, '超页结论重载后仍保留，不能因 Store 丢字段而假成功');
+  assert.equal(exceeded.pageBudget?.requirement, '不超过 2 页');
+  assert.match(exceeded.pageBudget?.reason || '', /实测为 3 页/);
+  assert.ok(exceeded.groups.some((group) => group.ruleId === 'page.delivery_budget'), '超页警告分组重载后仍可见');
+  assert.ok(exceeded.items.some((item) => item.isNew && item.message === '最终交付页数未通过实测预算' && item.pending === 1), '超页必须保留人工待处理项');
 
   await store.importFile(writeDocx('第三份技术标.docx', ['第三份']));
   const replaced = store.loadBlindCheck();
@@ -370,7 +389,8 @@ test('AI 复核与 AI 修复：假 Agent 走完整流程，修复结果与检查
     assert.ok(checked.issues.every((issue) => issue.ruleId === '' || !checked.result.groups.find((group) => group.id === issue.id)?.candidate), '整组判为不是问题的候选不出现在清单里');
     assert.ok(checked.issues.find((issue) => issue.id === sensitiveGroup.id).requirements.some((item) => /技术暗标中不得出现投标人名称/.test(item.text)), '不符合的条款挂到关联问题上');
 
-    await runBlindCheckFixTask({ agentService, aiService, workspaceStore: store, openXmlHelperService: helper, updateTask: () => undefined, checkpointTask: checkpoints('blind-check-fix'), payload: { ai: true }, taskControl });
+    await runBlindCheckFixTask({ agentService, aiService, workspaceStore: store, openXmlHelperService: helper, updateTask: () => undefined, checkpointTask: checkpoints('blind-check-fix'), payload: { ai: true }, taskControl,
+      pageMeasure: async () => ({ pages: 3, source: 'microsoft-word' }) });
     assert.deepEqual(agentService.stages, ['blind-check-review', 'blind-check-fix'], '检查和修复共用同一个持久会话');
     const fixed = store.loadBlindCheck().fixResult;
     assert.equal(fixed.status, 'success', fixed.error);
@@ -392,7 +412,8 @@ test('AI 复核与 AI 修复：假 Agent 走完整流程，修复结果与检查
 
     // AI 修复改到一半失败：已执行的修改留在副本里，按副本实际状态对账，修改记录照常保存。
     failFix = true;
-    await runBlindCheckFixTask({ agentService, aiService: {}, workspaceStore: store, openXmlHelperService: helper, updateTask: () => undefined, checkpointTask: checkpoints('blind-check-fix'), payload: { ai: true }, taskControl });
+    await runBlindCheckFixTask({ agentService, aiService: {}, workspaceStore: store, openXmlHelperService: helper, updateTask: () => undefined, checkpointTask: checkpoints('blind-check-fix'), payload: { ai: true }, taskControl,
+      pageMeasure: async () => ({ pages: 3, source: 'microsoft-word' }) });
     const failed = store.loadBlindCheck().fixResult;
     assert.equal(failed.status, 'success', failed.error);
     assert.deepEqual([failed.agent.status, failed.agent.error], ['error', '模型请求失败：连接超时']);

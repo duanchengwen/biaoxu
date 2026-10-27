@@ -755,6 +755,7 @@ function createAgentService({ app, configStore, aiService, licenseService, autoC
     const queueScopeId = safeText(options.queueScopeId || options.queue_scope_id);
     const signal = options.signal;
     const primarySessionRequested = options.primary_session === true;
+    const usageContextProvider = options.usageContextProvider || options.usage_context_provider;
     return {
       runTask: (payload = {}) => {
         const taskSignal = signal && payload.signal
@@ -762,6 +763,9 @@ function createAgentService({ app, configStore, aiService, licenseService, autoC
           : payload.signal || signal;
         return startTask({
           ...payload,
+          ...(!payload.usage_context && usageContextProvider ? {
+            usage_context: typeof usageContextProvider === 'function' ? usageContextProvider() : usageContextProvider,
+          } : {}),
           ...(queueScopeId && !payload.queueScopeId && !payload.queue_scope_id ? { queue_scope_id: queueScopeId } : {}),
           // 子任务可以显式拒绝继承主会话身份，队列和取消作用域仍照常继承。
           primary_session: payload.primary_session ?? primarySessionRequested,

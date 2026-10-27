@@ -183,6 +183,28 @@ static class TextFixes
     }
 
     /// <summary>
+    /// 软换行原本只属于一个段落，段前和段后各应用一次。拆成多个段落后，必须显式清掉拆分边界上的间距，
+    /// 否则直接格式或样式继承的自动间距会在每一行重复，长文档可能平白增加很多页。行距仍由各段沿用原格式。
+    /// </summary>
+    static void PreserveSplitParagraphSpacing(XElement paragraph, bool keepBefore, bool keepAfter)
+    {
+        var spacing = PropertyWriter.ParagraphChild(paragraph, "spacing");
+        if (!keepBefore)
+        {
+            PropertyWriter.SetAttr(spacing, "before", "0");
+            PropertyWriter.SetAttr(spacing, "beforeLines", "0");
+            PropertyWriter.SetAttr(spacing, "beforeAutospacing", "0");
+        }
+
+        if (!keepAfter)
+        {
+            PropertyWriter.SetAttr(spacing, "after", "0");
+            PropertyWriter.SetAttr(spacing, "afterLines", "0");
+            PropertyWriter.SetAttr(spacing, "afterAutospacing", "0");
+        }
+    }
+
+    /// <summary>
     /// 手动换行改为段落回车：在换行处把段落拆开，后面的段落沿用原段落格式（段前分页只留在第一段，分节符留在最后一段），
     /// 拆出来的空行不保留，新段开头的空格去掉（缩进交给段落格式）。标题、带编号或图文框的段落、含域的段落，
     /// 以及换行落在超链接、修订等包装里的段落不拆，记一条说明留给人工。在逐段修复之后执行，前面改好的文本块随拆分带到新段落。
@@ -278,6 +300,7 @@ static class TextFixes
             if (kept.Count == 0) kept.Add(leading);
             paragraph.Add(kept[0]);
             var previous = paragraph;
+            var splitParagraphs = new List<XElement> { paragraph };
             for (var index = 1; index < kept.Count; index += 1)
             {
                 var properties = pPr is null ? null : new XElement(pPr);
@@ -288,10 +311,15 @@ static class TextFixes
                 previous.AddAfterSelf(next);
                 TrimLeadingSpaces(next);
                 previous = next;
+                splitParagraphs.Add(next);
             }
 
             // 分节符属于原段落的最后一行，留在拆出的最后一段。
             if (kept.Count > 1) pPr?.Element(W.SectPr)?.Remove();
+            for (var index = 0; splitParagraphs.Count > 1 && index < splitParagraphs.Count; index += 1)
+            {
+                PreserveSplitParagraphSpacing(splitParagraphs[index], keepBefore: index == 0, keepAfter: index == splitParagraphs.Count - 1);
+            }
             count += direct;
             fix.Touch(record);
         }

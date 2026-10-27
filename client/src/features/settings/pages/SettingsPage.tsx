@@ -52,6 +52,7 @@ const textModelProviders: Array<{ value: TextModelProvider; label: string }> = [
   { value: 'jinlong', label: '金龙中转站【推荐】' },
   { value: 'volcengine', label: '火山方舟' },
   { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'glm', label: '智谱 GLM · 免费测试' },
   { value: 'agnes', label: 'Agnes AI' },
   { value: 'custom', label: '自定义' },
 ];
@@ -71,6 +72,7 @@ const textProviderDefaults: Record<TextModelProvider, TextModelConfig> = {
   jinlong: { api_key: '', base_url: 'https://jlaudeapi.com/v1', model_name: 'gpt-3.5-turbo', multimodal_enabled: false, reasoning_effort: '', context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT, output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT, concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
   volcengine: { api_key: '', base_url: 'https://ark.cn-beijing.volces.com/api/v3', model_name: '', multimodal_enabled: false, reasoning_effort: '', context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT, output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT, concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
   deepseek: { api_key: '', base_url: 'https://api.deepseek.com', model_name: '', multimodal_enabled: false, reasoning_effort: '', context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT, output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT, concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
+  glm: { api_key: '', base_url: 'https://open.bigmodel.cn/api/paas/v4', model_name: 'glm-4.7-flash', multimodal_enabled: false, reasoning_effort: '', context_length_limit: 200000, output_token_limit: 128000, concurrency_limit: 1, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
   agnes: { api_key: '', base_url: 'https://apihub.agnes-ai.com/v1', model_name: '', multimodal_enabled: false, reasoning_effort: '', context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT, output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT, concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
   custom: { api_key: '', base_url: '', model_name: '', multimodal_enabled: false, reasoning_effort: '', context_length_limit: DEFAULT_TEXT_CONTEXT_LENGTH_LIMIT, output_token_limit: DEFAULT_TEXT_OUTPUT_TOKEN_LIMIT, concurrency_limit: DEFAULT_TEXT_CONCURRENCY_LIMIT, temperature_enabled: false, temperature: DEFAULT_TEXT_TEMPERATURE, request_mode: 'stream' },
 };
@@ -88,6 +90,7 @@ const textProviderApiKeyUrls: Partial<Record<TextModelProvider, string>> = {
   jinlong: 'https://s.markup.com.cn/jl',
   volcengine: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
   deepseek: 'https://platform.deepseek.com/api_keys',
+  glm: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
   agnes: 'https://platform.agnes-ai.com/settings/apiKeys',
 };
 
@@ -152,15 +155,17 @@ function parseTextTemperatureInput(value: string): number {
 
 function normalizeTextModelProfile(provider: TextModelProvider, profile?: Partial<TextModelConfig>): TextModelConfig {
   const defaults = textProviderDefaults[provider];
+  const glmModel = profile?.model_name === 'glm-4-flash-250414' ? profile.model_name : 'glm-4.7-flash';
+  const glmLegacy = glmModel === 'glm-4-flash-250414';
   const baseUrl = provider === 'custom' ? profile?.base_url ?? defaults.base_url : defaults.base_url;
   return {
     api_key: profile?.api_key ?? defaults.api_key,
     base_url: baseUrl,
-    model_name: profile?.model_name ?? defaults.model_name,
-    multimodal_enabled: profile?.multimodal_enabled ?? defaults.multimodal_enabled,
+    model_name: provider === 'glm' ? glmModel : profile?.model_name ?? defaults.model_name,
+    multimodal_enabled: provider === 'glm' ? false : profile?.multimodal_enabled ?? defaults.multimodal_enabled,
     reasoning_effort: profile?.reasoning_effort?.trim() ?? defaults.reasoning_effort,
-    context_length_limit: normalizeTextContextLengthLimit(profile?.context_length_limit, defaults.context_length_limit),
-    output_token_limit: normalizeTextOutputTokenLimit(profile?.output_token_limit, defaults.output_token_limit),
+    context_length_limit: Math.min(normalizeTextContextLengthLimit(profile?.context_length_limit, defaults.context_length_limit), provider === 'glm' ? (glmLegacy ? 128000 : 200000) : Infinity),
+    output_token_limit: Math.min(normalizeTextOutputTokenLimit(profile?.output_token_limit, defaults.output_token_limit), provider === 'glm' ? (glmLegacy ? 16000 : 128000) : Infinity),
     concurrency_limit: normalizeTextConcurrencyLimit(profile?.concurrency_limit, defaults.concurrency_limit),
     temperature_enabled: profile?.temperature_enabled ?? defaults.temperature_enabled,
     temperature: normalizeTextTemperature(profile?.temperature, defaults.temperature),
@@ -179,7 +184,7 @@ function normalizeTextModelProfiles(
 
 function textProfileFromState(textModel: SettingsPageState['textModel']): TextModelConfig {
   const defaults = textProviderDefaults[textModel.provider];
-  return {
+  return normalizeTextModelProfile(textModel.provider, {
     api_key: textModel.api_key,
     base_url: textModel.provider === 'custom' ? textModel.base_url : defaults.base_url,
     model_name: textModel.model_name,
@@ -191,7 +196,7 @@ function textProfileFromState(textModel: SettingsPageState['textModel']): TextMo
     temperature_enabled: textModel.temperature_enabled,
     temperature: normalizeTextTemperature(textModel.temperature, defaults.temperature),
     request_mode: textModel.request_mode,
-  };
+  });
 }
 
 const imageProviders: Array<{ value: ImageModelProvider; label: string }> = [
@@ -1003,7 +1008,9 @@ function SettingsPage({ onDeveloperModeChange, request, onRequestHandled, regist
   const updateTextModelName = (modelName: string) => {
     setReasoningEfforts([]);
     setState((prev) => {
-      const textModel = prev.textModel.model_name === modelName
+      const textModel = prev.textModel.provider === 'glm'
+        ? { provider: prev.textModel.provider, ...normalizeTextModelProfile('glm', { ...textProfileFromState(prev.textModel), model_name: modelName }) }
+        : prev.textModel.model_name === modelName
         ? prev.textModel
         : { ...prev.textModel, model_name: modelName, reasoning_effort: '' };
       return {
@@ -1806,10 +1813,15 @@ function SettingsPage({ onDeveloperModeChange, request, onRequestHandled, regist
                 <label className="settings-row">
                   <div className="settings-row-copy">
                     <strong>模型名称</strong>
-                    <span>可手动录入，也可从当前 Base URL 拉取可用模型</span>
+                    <span>{state.textModel.provider === 'glm' ? '仅列出官方免费文本型号，不自动切换型号；免费政策和限额以官方为准。原配置的 AI 生图仍可能收费，免费流程测试请关闭 AI 配图。' : '可手动录入，也可从当前 Base URL 拉取可用模型'}</span>
                   </div>
                   <div className="settings-control-with-action">
-                    {textModels.length > 0 ? (
+                    {state.textModel.provider === 'glm' ? (
+                      <select value={state.textModel.model_name} onChange={(event) => updateTextModelName(event.target.value)}>
+                        <option value="glm-4.7-flash">GLM-4.7-Flash · 免费</option>
+                        <option value="glm-4-flash-250414">GLM-4-Flash-250414 · 免费（较轻量）</option>
+                      </select>
+                    ) : textModels.length > 0 ? (
                       <select
                         value={state.textModel.model_name}
                         onChange={(event) => updateTextModelName(event.target.value)}
@@ -1828,7 +1840,7 @@ function SettingsPage({ onDeveloperModeChange, request, onRequestHandled, regist
                       type="button"
                       className="inline-action"
                       onClick={fetchTextModels}
-                      disabled={loadingModels === 'text'}
+                      disabled={loadingModels === 'text' || state.textModel.provider === 'glm'}
                     >
                       {loadingModels === 'text' && <InlineSpinner />}
                       {loadingModels === 'text' ? '获取中' : '获取'}
@@ -1852,10 +1864,10 @@ function SettingsPage({ onDeveloperModeChange, request, onRequestHandled, regist
                 <div className="settings-row">
                   <div className="settings-row-copy">
                     <strong>当前文本模型支持读图</strong>
-                    <span>开启前请确认模型真实支持图片输入。暗标选择“AI 复核”后会优先用当前模型逐图识别姓名、单位、徽标等画面风险，本地 OCR 仅辅助定位和失败兜底；仅程序检查不调用模型，视觉请求可能产生费用。</span>
+                    <span>{state.textModel.provider === 'glm' ? '这两个免费测试型号只支持文本，不能用它们验收图片中的暗标问题。需要图片复核时请切换支持读图的模型。' : '开启前请确认模型真实支持图片输入。暗标选择“AI 复核”后会优先用当前模型逐图识别姓名、单位、徽标等画面风险，本地 OCR 仅辅助定位和失败兜底；仅程序检查不调用模型，视觉请求可能产生费用。'}</span>
                   </div>
                   <div className="settings-action-cell">
-                    <AppSwitch aria-label="当前文本模型支持读图" checked={state.textModel.multimodal_enabled} onCheckedChange={(checked) => updateTextModelConfig({ multimodal_enabled: checked })} />
+                    <AppSwitch aria-label="当前文本模型支持读图" checked={state.textModel.multimodal_enabled} disabled={state.textModel.provider === 'glm'} onCheckedChange={(checked) => updateTextModelConfig({ multimodal_enabled: checked })} />
                   </div>
                 </div>
                 <label className="settings-row">

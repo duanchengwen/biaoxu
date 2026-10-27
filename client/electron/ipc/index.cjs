@@ -37,6 +37,7 @@ const { createFileService } = require('../services/fileService.cjs');
 const { createKnowledgeBaseService } = require('../services/knowledgeBaseService.cjs');
 const { createKnowledgeBaseStore } = require('../services/knowledgeBaseStore.cjs');
 const { createLicenseService } = require('../services/licenseService.cjs');
+const { createModelUsageLedger } = require('../services/modelUsageLedger.cjs');
 const { createRejectionCheckStore } = require('../services/rejectionCheckStore.cjs');
 const { createSqliteDatabase } = require('../services/sqliteDatabase.cjs');
 const { createSystemFontService } = require('../services/systemFontService.cjs');
@@ -232,6 +233,7 @@ const workspaceDatabaseChannels = [
   'tasks:pause-feasibility-content',
   'tasks:start-feasibility-human-writing',
   'tasks:get-active',
+  'tasks:get-usage',
   'templates:list',
   'templates:get',
   'templates:create',
@@ -386,7 +388,8 @@ function registerIpcHandlers({ app, mainWindow, checkAndDownloadUpdate, triggerU
   const configStore = createConfigStore(app);
   initLocalImageRenderService({ configStore });
   const licenseService = createLicenseService({ app, configStore });
-  const aiService = createAiService({ app, configStore });
+  const modelUsageLedger = createModelUsageLedger({ app });
+  const aiService = createAiService({ app, configStore, modelUsageLedger });
   const developerExpansionReplaceTestService = createDeveloperExpansionReplaceTestService({ aiService });
   const developerLayoutFigureService = createDeveloperLayoutFigureService({ app, aiService });
   const autoConfirmationService = createAutoConfirmationService({ configStore });

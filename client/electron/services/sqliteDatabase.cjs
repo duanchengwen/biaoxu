@@ -3,7 +3,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { getWorkspaceDatabasePath } = require('../utils/paths.cjs');
 
-const schemaVersion = 44;
+const schemaVersion = 45;
 
 // 保存当前工作区的一份开票信息。
 function createOfficialInvoiceSchema(db) {
@@ -1357,6 +1357,7 @@ function createBlindCheckFixSchema(db) {
       before_rule_counts_json TEXT,
       after_summary_json TEXT,
       after_stats_json TEXT,
+      page_budget_json TEXT,
       error TEXT,
       updated_at TEXT
     );
@@ -1411,6 +1412,12 @@ function addBlindCheckReview(db) {
   addColumnIfMissing(db, 'blind_check_fix_results', 'clauses_json', 'TEXT');
   addColumnIfMissing(db, 'blind_check_fix_results', 'agent_json', 'TEXT');
   createBlindCheckReviewSchema(db);
+}
+
+// 暗标修复最终交付页数的 Word 实测验收结果。与修复副本一起持久化，
+// 使重启后仍能明确显示“通过”或“超页待人工处理”，不能因重载丢字段而假成功。
+function addBlindCheckFixPageBudget(db) {
+  addColumnIfMissing(db, 'blind_check_fix_results', 'page_budget_json', 'TEXT');
 }
 
 const schemaHealthTableGroups = [
@@ -1814,6 +1821,13 @@ const schemaHealthColumnGroups = [
       maximum_pages: 'INTEGER NOT NULL DEFAULT 0',
     },
   },
+  {
+    version: 45,
+    table: 'blind_check_fix_results',
+    columns: {
+      page_budget_json: 'TEXT',
+    },
+  },
 ];
 
 function quoteIdentifier(value) {
@@ -2093,6 +2107,11 @@ const migrations = [
     version: 44,
     description: '技术方案新增页数与字数双模式及页数范围',
     up: addTechnicalPlanPageRangeMode,
+  },
+  {
+    version: 45,
+    description: '暗标修复新增最终交付页数验收结果',
+    up: addBlindCheckFixPageBudget,
   },
 ];
 

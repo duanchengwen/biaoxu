@@ -160,6 +160,11 @@ function getAgentRuntimeDir(app) {
   return path.join(getUserDataPath(app), 'agent-runtime');
 }
 
+/** 本机模型请求用量台账；仅保存请求元数据和 Token 数，不保存 Prompt、响应、密钥或业务文件路径。 */
+function getModelUsageDir(app) {
+  return path.join(getUserDataPath(app), 'model-usage');
+}
+
 function getPlatformArchKey() {
   return `${process.platform}-${process.arch}`;
 }
@@ -241,6 +246,7 @@ module.exports = {
   getImportedImagesDir,
   getKnowledgeBaseDir,
   getLicenseFilePath,
+  getModelUsageDir,
   getOfficialApiSessionFilePath,
   getOfficialRechargeQrCachePath,
   getOpenXmlHelperDebugExecutablePath,

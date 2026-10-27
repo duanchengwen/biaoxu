@@ -17,7 +17,7 @@ const { SUBMISSION_FIX_TOOL, SUBMISSION_FIX_PARALLEL_THRESHOLD, imageStructure, 
 const { warmPromptPrefix, sharedPrefixMessages } = require('../utils/promptPrefixCache.cjs');
 const { NATURAL_WRITING_STANDARD } = require('./contentGenerationWritingStyle.cjs');
 const { createAiBatchGuard, isBatchCancelled } = require('../utils/aiBatchGuard.cjs');
-const { CONSISTENCY_TOOLS, LEDGER_FILE, LEDGER_JSON, extractConsistencyLedger, buildConsistencyPrompt, collectConsistencySubmissionIssues, createContentGenerationConsistencyTools } = require('./contentGenerationConsistencyTools.cjs');
+const { CONSISTENCY_TOOLS, LEDGER_FILE, LEDGER_JSON, CONSISTENCY_ISSUES_FILE, SEMANTIC_REVIEW_FILE, SEMANTIC_REVIEW_JSON, extractConsistencyLedger, refreshConsistencyAfterRepairs, buildConsistencySemanticReview, buildConsistencyPrompt, collectConsistencySubmissionIssues, createContentGenerationConsistencyTools } = require('./contentGenerationConsistencyTools.cjs');
 const { TABLE_CLEANUP_TOOL, TABLE_CLEANUP_TOOLS, hasDataTables, buildTableCleanupPrompt, createContentGenerationTableTools } = require('./contentGenerationTableTools.cjs');
 const { LAYOUT_TOOL, LAYOUT_TOOLS, buildLayoutPrompt, createContentGenerationLayoutTools } = require('./contentGenerationLayoutTools.cjs');
 
@@ -50,7 +50,7 @@ const BASELINE_GROUPS = { sections: 'content-sections', originalImages: 'origina
 
 // 程序写入台账后刷新登记，Agent 改动的台账在提交校验前还原。
 const protectLedger = (baseline, workspaceDir) => baseline?.setGroup(BASELINE_GROUPS.ledger,
-  [LEDGER_JSON, LEDGER_FILE].filter(file => fs.existsSync(path.join(workspaceDir, file))));
+  [LEDGER_JSON, LEDGER_FILE, CONSISTENCY_ISSUES_FILE, SEMANTIC_REVIEW_JSON, SEMANTIC_REVIEW_FILE].filter(file => fs.existsSync(path.join(workspaceDir, file))));
 
 // Runtime 在发出阶段要求前记录 prompted_stage；与当前阶段一致说明该阶段要求已在会话中。
 function wasStagePrompted(state, stage) {
@@ -695,6 +695,8 @@ async function runContentGenerationAgent({ agentService, aiService, generationOp
     extractSignal.throwIfAborted();
     const failed = Object.keys(ledger.failures).length;
     if (failed) (context.onActivity || onActivity)?.({ message: `${failed} 个小节一致性核对失败，已写入台账交由主 Agent 重新核对或自行核对。` });
+    await buildConsistencySemanticReview({ aiService, workspaceDir: context.workspace_dir, signal: extractSignal, onActivity: context.onActivity || onActivity });
+    extractSignal.throwIfAborted();
     protectLedger(context.baseline, context.workspace_dir);
     consistency.save({ ...consistencyState, status: 'running' });
   }
@@ -735,8 +737,42 @@ async function runContentGenerationAgent({ agentService, aiService, generationOp
       return { complete: true };
     })();
   }
-  // 审计结束后按既有配置去表格，随后进入本地格式检测。
-  function finishConsistency(context, result) {
+  // 一致性修复改动会使旧台账 hash 失效。阶段接受后只重查实际变动小节，
+  // 用较短的结构化事实/文风响应替代后续整节默认重写；未变小节不新增请求。
+  async function finishConsistency(context, result) {
+    const refreshed = await refreshConsistencyAfterRepairs({
+      aiService,
+      workspaceDir: context.workspace_dir,
+      signal: context.signal || signal,
+      onActivity: context.onActivity || onActivity,
+    });
+    const recheckedIds = refreshed.recheckedIds;
+    if (recheckedIds.length) {
+      protectLedger(context.baseline, context.workspace_dir);
+      const failedIds = refreshed.failedIds;
+      if (failedIds.length) {
+        throw new Error(`一致性修复后的定点复核有 ${failedIds.length} 节未完成，正文已保留；继续任务将只重试这些小节。`);
+      }
+      const remainingIds = refreshed.remainingIssueIds;
+      if (remainingIds.length && !consistencyState.post_recheck_returned) {
+        consistency.save({
+          ...consistencyState,
+          status: 'running',
+          submission: null,
+          post_recheck_returned: true,
+          post_recheck_section_ids: recheckedIds,
+          post_recheck_remaining_ids: remainingIds,
+        });
+        protectLedger(context.baseline, context.workspace_dir);
+        return next('auditing', `修复后的定点复核仍在 ${remainingIds.length} 个小节发现事实问题。只读取《${CONSISTENCY_ISSUES_FILE}》中的新问题，用 search-sections 定点核实并修复；不要读取完整事实台账、重新遍历全文或重复处理已通过小节。完成后再次调用 complete-consistency-round。`);
+      }
+      consistency.save({
+        ...consistencyState,
+        post_recheck_completed: true,
+        post_recheck_section_ids: recheckedIds,
+        post_recheck_remaining_ids: remainingIds,
+      });
+    }
     const decisions = JSON.parse(fs.readFileSync(path.join(context.workspace_dir, INPUT_FILES.decisions), 'utf8'));
     if (decisions.table_requirement !== 'none') return finishLayout(context, result);
     tableCleanup.save({ status: 'running', section_ids: [], completed_section_ids: [], remaining_section_ids: [], remaining: [], failures: {}, submission: null });

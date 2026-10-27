@@ -6,7 +6,7 @@ const Database = require('better-sqlite3');
 const { createSqliteDatabase, schemaVersion } = require('../electron/services/sqliteDatabase.cjs');
 const { createTechnicalPlanStore } = require('../electron/services/technicalPlanStore.cjs');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-v44-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yibiao-v45-'));
 const app = {
   getPath(name) {
     assert.equal(name, 'userData');
@@ -34,11 +34,11 @@ function openStore() {
 }
 
 try {
-  assert.equal(schemaVersion, 44);
+  assert.equal(schemaVersion, 45);
   const baselinePath = path.join(root, 'workspace-schema.sqlite');
   const baseline = new Database(baselinePath);
   baseline.exec(fs.readFileSync(path.resolve(__dirname, '..', '..', 'sql', 'workspace_schema.sql'), 'utf8'));
-  assert.equal(baseline.pragma('user_version', { simple: true }), 44);
+  assert.equal(baseline.pragma('user_version', { simple: true }), 45);
   const baselineColumns = new Set(baseline.pragma('table_info(technical_plan_generation_config)').map(row => row.name));
   assert(baselineColumns.has('target_pages'));
   assert(baselineColumns.has('word_control_mode'));
@@ -70,7 +70,7 @@ try {
   assert(columns.has('word_control_mode'));
   assert(columns.has('minimum_pages'));
   assert(columns.has('maximum_pages'));
-  assert.equal(migrated.database.db.pragma('user_version', { simple: true }), 44);
+  assert.equal(migrated.database.db.pragma('user_version', { simple: true }), 45);
 
   const defaults = migrated.store.loadGenerationConfig();
   assert.equal(defaults.outlineWordControlOptions.mode, 'words');
@@ -126,6 +126,20 @@ try {
   assert.equal(inferredConfig.minimumWords, 12345);
   assert.equal(inferredConfig.maximumWords, 23456);
   inferred.database.close();
+
+  // 模拟已经运行 v44、但尚无暗标页数验收列的用户数据库：v45 必须幂等补列，
+  // 不能要求用户重新导入或重新修复既有文档。
+  const v44 = new Database(databasePath);
+  v44.exec(`
+    ALTER TABLE blind_check_fix_results DROP COLUMN page_budget_json;
+    PRAGMA user_version = 44;
+  `);
+  v44.close();
+  const pageBudgetMigrated = openStore();
+  const fixColumns = new Set(pageBudgetMigrated.database.db.pragma('table_info(blind_check_fix_results)').map(row => row.name));
+  assert(fixColumns.has('page_budget_json'));
+  assert.equal(pageBudgetMigrated.database.db.pragma('user_version', { simple: true }), 45);
+  pageBudgetMigrated.database.close();
   console.log('target pages schema and recovery checks passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });

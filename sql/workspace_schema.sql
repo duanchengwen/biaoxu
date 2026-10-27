@@ -14,7 +14,7 @@ PRAGMA busy_timeout = 5000;
 
 -- 目标完整结构版本。
 -- 运行时代码应通过 PRAGMA user_version 判断是否需要自动升级。
-PRAGMA user_version = 44;
+PRAGMA user_version = 45;
 
 -- ============================================================================
 -- 技术方案 technical_plan_*（v1 已落地）
@@ -1143,6 +1143,8 @@ CREATE TABLE IF NOT EXISTS blind_check_fix_results (
   before_rule_counts_json TEXT,
   after_summary_json TEXT,
   after_stats_json TEXT,
+  -- v45：暗标修复最终交付页数的 Word 实测验收结果。
+  page_budget_json TEXT,
   error TEXT,
   updated_at TEXT,
   -- v41：与检查结果逐条对应的修复结论、修复后新出现的问题、修复后的条款对照、AI 修复阶段的状态与修改记录。
